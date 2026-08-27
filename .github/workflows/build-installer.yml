@@ -79,6 +79,7 @@ jobs:
             make \
             gettext \
             po4a \
+            debian-archive-keyring \
             debootstrap \
             squashfs-tools \
             xorriso \
