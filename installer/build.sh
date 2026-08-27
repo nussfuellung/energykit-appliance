@@ -3,7 +3,7 @@ set -Eeuo pipefail
 cd "$(dirname "$0")"
 command -v lb >/dev/null || { echo "live-build fehlt. Debian/Ubuntu: sudo apt install live-build"; exit 1; }
 rm -rf .build-cache binary* chroot* cache local .build
-./auto/config
+bash ./auto/config
 lb build
 ISO="$(find . -maxdepth 1 -name 'live-image-amd64.hybrid.iso' -print -quit)"
 if [[ -n "$ISO" ]]; then
