@@ -1,30 +1,55 @@
 name: Build EnergyKit Appliance
+
 on:
   workflow_dispatch:
   push:
     tags:
-      - 'v*'
+      - "v*"
+
 permissions:
   contents: write
   packages: write
+
 jobs:
   image:
     runs-on: ubuntu-24.04
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Derive image metadata
         id: meta
         shell: bash
         run: |
-          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
-          echo "version=$(awk -F'\"' '/^version:/{print $2; exit}' energykit/config.yaml)" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v6
+          set -euo pipefail
+
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          VERSION="$(awk -F'"' '/^version:/{print $2; exit}' energykit/config.yaml)"
+
+          if [[ -z "$VERSION" ]]; then
+            echo "Could not determine EnergyKit version."
+            exit 1
+          fi
+
+          echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          echo "GHCR owner: $OWNER"
+          echo "EnergyKit version: $VERSION"
+
+      - name: Build and push EnergyKit app image
+        uses: docker/build-push-action@v6
         with:
           context: ./energykit
           file: ./energykit/Dockerfile
@@ -37,36 +62,114 @@ jobs:
   iso:
     needs: image
     runs-on: ubuntu-24.04
+
+    container:
+      image: debian:bookworm
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          apt-get update
+
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            git \
+            ca-certificates \
+            curl \
+            live-build \
+            debootstrap \
+            squashfs-tools \
+            xorriso \
+            isolinux \
+            syslinux-common \
+            grub-pc-bin \
+            grub-efi-amd64-bin \
+            mtools \
+            dosfstools \
+            file
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== OS ==="
+          cat /etc/os-release
+
+          echo
+          echo "=== live-build ==="
+          lb --version || true
+
+          echo
+          echo "=== debootstrap ==="
+          debootstrap --version || true
+
       - name: Render release-specific app metadata
+        shell: bash
         env:
           ENERGYKIT_GHCR_OWNER: ${{ github.repository_owner }}
           ENERGYKIT_REPOSITORY_URL: https://github.com/${{ github.repository }}
-        run: bash ./scripts/render-release.sh
-      - name: Install live-build
-        run: sudo apt-get update && sudo apt-get install -y live-build xorriso isolinux syslinux-common
+        run: |
+          set -euo pipefail
+          bash ./scripts/render-release.sh
+
+      - name: Show rendered EnergyKit metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== energykit/config.yaml ==="
+          cat energykit/config.yaml
+
+          echo
+          echo "=== preloaded config.yaml ==="
+          if [[ -f installer/preload/energykit/config.yaml ]]; then
+            cat installer/preload/energykit/config.yaml
+          fi
+
       - name: Build ISO
-        run: sudo bash ./installer/build.sh
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ./installer/build.sh
 
       - name: Verify ISO artifact
         shell: bash
         run: |
           set -euo pipefail
+
           test -s energykit-installer-amd64.iso
           test -s energykit-installer-amd64.iso.sha256
-          sha256sum -c energykit-installer-amd64.iso.sha256
-          file energykit-installer-amd64.iso
-          du -h energykit-installer-amd64.iso
-          grep -a -q "EnergyKit Appliance Installer" energykit-installer-amd64.iso || true
 
-      - uses: actions/upload-artifact@v4
+          echo "=== SHA-256 ==="
+          sha256sum -c energykit-installer-amd64.iso.sha256
+
+          echo
+          echo "=== File type ==="
+          file energykit-installer-amd64.iso
+
+          echo
+          echo "=== File size ==="
+          du -h energykit-installer-amd64.iso
+
+          echo
+          echo "ISO artifact verification completed."
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
         with:
           name: energykit-installer-amd64
           path: |
             energykit-installer-amd64.iso
             energykit-installer-amd64.iso.sha256
-      - name: Attach to GitHub release
+          if-no-files-found: error
+
+      - name: Attach ISO to GitHub release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
