@@ -196,3 +196,12 @@ v0.4.1 fügt außerdem nach dem ISO-Build einen formalen Artifact-Check inklusiv
 ablegen. Der Build verlangt `EFI/BOOT/BOOTX64.EFI` deshalb nicht mehr als
 sichtbare ISO9660-Datei. Stattdessen wird die El-Torito-/UEFI-Bootstruktur mit
 `xorriso -report_el_torito` geprüft. Kernel und initrd bleiben harte Checks.
+
+
+## ISO sanity check v3
+
+Kernel- und initrd-Pfade sind nur noch diagnostisch. Harte Build-Abbrüche
+erfolgen nur noch, wenn keine UEFI-/El-Torito-Bootstruktur erkannt wird.
+Zusätzlich werden `/live`, sichtbare GRUB-/EFI-Dateien und der ISO-Root im
+GitHub-Log ausgegeben, damit unterschiedliche live-build-Strukturen direkt
+sichtbar sind.
