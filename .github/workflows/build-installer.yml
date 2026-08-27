@@ -78,6 +78,7 @@ jobs:
             git \
             make \
             gettext \
+            po4a \
             debootstrap \
             squashfs-tools \
             xorriso \
