@@ -20,7 +20,7 @@ import websockets
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
-APP_VERSION = "0.5.4"
+APP_VERSION = "0.5.5"
 SUPERVISOR = "http://supervisor"
 TOKEN = os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("ENERGYKIT_SUPERVISOR_TOKEN", "")
 DATA = Path("/config")

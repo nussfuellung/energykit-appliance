@@ -10,7 +10,7 @@ terminal-border: "0"
 
 + boot_menu {
   left = 6%
-  top = 49%
+  top = 47%
   width = 48%
   height = 33%
   item_height = 54

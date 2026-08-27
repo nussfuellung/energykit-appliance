@@ -6,6 +6,7 @@ lb config noauto \
   --distribution bookworm \
   --architectures amd64 \
   --binary-images iso-hybrid \
+  --bootloaders "grub-pc grub-efi" \
   --archive-areas "main contrib non-free non-free-firmware" \
   --mirror-bootstrap "http://deb.debian.org/debian" \
   --mirror-chroot "http://deb.debian.org/debian" \

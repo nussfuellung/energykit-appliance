@@ -216,3 +216,15 @@ sichtbar sind.
 - Buttons erhalten sichtbaren Tastaturfokus
 - `Enter` löst weiterhin die primäre Aktion aus
 - GRUB-Konfiguration in diesem Fix bewusst unverändert
+
+
+## v0.5.5 – GRUB + Installer Polish
+
+- grafischer Installer hält jetzt garantiert Abstand zum Logo/Header
+- Bestätigungs-Checkbox und Installieren-Button sind immer sichtbar
+- Bestätigungsbereich visuell hervorgehoben
+- GRUB-Theme komplett auf live-build-native Struktur zurückgeführt
+- BIOS und UEFI verwenden dieselbe `grub.cfg` / `config.cfg`
+- `--bootloaders "grub-pc grub-efi"`
+- fragile Binary-Hooks entfernt
+- GRUB-Buildprüfung nur noch diagnostisch, keine False-Positive-Abbrüche

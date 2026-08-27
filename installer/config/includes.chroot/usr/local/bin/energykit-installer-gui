@@ -111,8 +111,8 @@ class Installer(tk.Tk):
         sw = self.winfo_screenwidth()
         pad = max(28, min(52, sw // 28))
         self._pad = pad
-        self.header = tk.Frame(self, bg=BG, height=68)
-        self.header.pack(fill="x", padx=pad, pady=(12, 4))
+        self.header = tk.Frame(self, bg=BG, height=96)
+        self.header.pack(fill="x", padx=pad, pady=(14, 8))
         self.header.pack_propagate(False)
         if LOGO.exists():
             try:
@@ -123,10 +123,10 @@ class Installer(tk.Tk):
         meta = tk.Frame(self.header, bg=BG)
         meta.pack(side="right", anchor="n")
         tk.Label(meta, text="EnergyKit Appliance", fg=TEXT, bg=BG, font=("DejaVu Sans",13,"bold")).pack(anchor="e")
-        tk.Label(meta, text="Installer v0.5.4", fg=CYAN, bg=BG, font=self.font_small).pack(anchor="e", pady=(4,0))
+        tk.Label(meta, text="Installer v0.5.5", fg=CYAN, bg=BG, font=self.font_small).pack(anchor="e", pady=(4,0))
 
         self.body = tk.Frame(self, bg=BG)
-        self.body.pack(fill="both", expand=True, padx=self._pad, pady=8)
+        self.body.pack(fill="both", expand=True, padx=self._pad, pady=(10, 8))
 
         self.footer = tk.Frame(self, bg=BG, height=46)
         self.footer.pack(fill="x", padx=self._pad, pady=(0,8))
@@ -139,14 +139,11 @@ class Installer(tk.Tk):
         for w in self.body.winfo_children():
             w.destroy()
 
-    def card(self, parent=None, padx=26, pady=22):
+    def card(self, parent=None, padx=24, pady=20):
         host = parent or self.body
         outer = tk.Frame(host, bg=BG)
         outer.pack(fill="both", expand=True)
 
-        # Do NOT disable geometry propagation here. The previous implementation
-        # used pack_propagate(False) without an explicit height, which collapsed
-        # the entire wizard content into a thin strip.
         f = tk.Frame(
             outer,
             bg=PANEL,
@@ -154,10 +151,13 @@ class Installer(tk.Tk):
             highlightthickness=1
         )
 
-        # Keep the UniFi-like centered appliance panel, but let Tk calculate its
-        # height from the actual contents.
-        side = max(18, min(110, self.winfo_screenwidth() // 18))
-        f.pack(fill="both", expand=True, padx=side, pady=(4, 8))
+        # Keep comfortable breathing room around the card so it never touches
+        # the header/logo area, even at 1024x768.
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        side = max(24, min(120, sw // 16))
+        top_bottom = max(6, min(18, sh // 60))
+        f.pack(fill="both", expand=True, padx=side, pady=(top_bottom, top_bottom))
 
         inner = tk.Frame(f, bg=PANEL)
         inner.pack(fill="both", expand=True, padx=padx, pady=pady)
@@ -165,7 +165,7 @@ class Installer(tk.Tk):
 
     def title_block(self, parent, eyebrow, title, subtitle):
         tk.Label(parent, text=eyebrow.upper(), fg=CYAN, bg=PANEL, font=("DejaVu Sans",9,"bold")).pack(anchor="w")
-        tk.Label(parent, text=title, fg=TEXT, bg=PANEL, font=self.font_title).pack(anchor="w", pady=(8,5))
+        tk.Label(parent, text=title, fg=TEXT, bg=PANEL, font=self.font_title).pack(anchor="w", pady=(6,4))
         tk.Label(
             parent,
             text=subtitle,
@@ -257,7 +257,7 @@ class Installer(tk.Tk):
         tk.Label(warn, text="⚠  Die ausgewählte Zieldisk wird vollständig überschrieben.", fg="#f6c980", bg="#211b15", font=self.font_body).pack(anchor="w", padx=15, pady=13)
 
         actions = tk.Frame(c, bg=PANEL)
-        actions.pack(fill="x", pady=(12,0))
+        actions.pack(fill="x", side="bottom", pady=(14,0))
         self.continue_btn = self.button(actions, "Weiter", self.confirm_disk, primary=True,
                                         state="normal" if self.disk_var.get() else "disabled")
         self.continue_btn.pack(side="right")
@@ -305,28 +305,67 @@ class Installer(tk.Tk):
         self.target = target
         self.clear_body()
         c = self.card()
-        self.title_block(c, "Bestätigung", "Bereit zur Installation",
-                         "Bitte kontrolliere das Ziel. Nach dem Start wird die Disk ohne weitere Rückfrage überschrieben.")
+        self.title_block(
+            c,
+            "Bestätigung",
+            "Bereit zur Installation",
+            "Bitte kontrolliere das Ziel. Erst nach deiner Bestätigung wird die Disk überschrieben."
+        )
 
         detail = tk.Frame(c, bg=PANEL2, highlightbackground=LINE, highlightthickness=1)
-        detail.pack(fill="x", pady=24)
-        tk.Label(detail, text="Installationsziel", fg=MUTED, bg=PANEL2, font=self.font_small).pack(anchor="w", padx=18, pady=(15,3))
-        tk.Label(detail, text=target, fg=TEXT, bg=PANEL2, font=("DejaVu Sans",16,"bold")).pack(anchor="w", padx=18)
-        tk.Label(detail, text=f"Home Assistant OS {HAOS_VERSION} + EnergyKit", fg="#9db0c2", bg=PANEL2, font=self.font_body).pack(anchor="w", padx=18, pady=(5,16))
+        detail.pack(fill="x", pady=(18, 14))
+        tk.Label(detail, text="Installationsziel", fg=MUTED, bg=PANEL2, font=self.font_small).pack(anchor="w", padx=18, pady=(14,3))
+        tk.Label(detail, text=target, fg=TEXT, bg=PANEL2, font=("DejaVu Sans",15,"bold")).pack(anchor="w", padx=18)
+        tk.Label(
+            detail,
+            text=f"Home Assistant OS {HAOS_VERSION} + EnergyKit",
+            fg="#9db0c2",
+            bg=PANEL2,
+            font=self.font_body
+        ).pack(anchor="w", padx=18, pady=(4,14))
+
+        # Confirmation area is always visible and visually distinct.
+        confirm_box = tk.Frame(c, bg="#211b15", highlightbackground="#58452d", highlightthickness=1)
+        confirm_box.pack(fill="x", pady=(2, 12))
 
         self.accept_var = tk.BooleanVar(False)
-        cb = tk.Checkbutton(c, text="Ich bestätige, dass alle Daten auf dieser Disk gelöscht werden dürfen.",
-                            variable=self.accept_var, bg=PANEL, fg=TEXT, activebackground=PANEL,
-                            activeforeground=TEXT, selectcolor=PANEL2, font=self.font_body)
-        cb.pack(anchor="w", pady=8)
+        cb = tk.Checkbutton(
+            confirm_box,
+            text="Ich bestätige, dass alle Daten auf dieser Disk gelöscht werden dürfen.",
+            variable=self.accept_var,
+            bg="#211b15",
+            fg="#f6c980",
+            activebackground="#211b15",
+            activeforeground="#f6c980",
+            selectcolor=PANEL2,
+            font=self.font_body,
+            cursor="hand2",
+            padx=14,
+            pady=12,
+            anchor="w",
+            justify="left"
+        )
+        cb.pack(fill="x")
 
         actions = tk.Frame(c, bg=PANEL)
-        actions.pack(fill="x", pady=(28,0))
-        self.button(actions, "Zurück", self.show_welcome, primary=False).pack(side="left")
-        install_btn = self.button(actions, "EnergyKit installieren", self.start_install, primary=True, state="disabled")
+        actions.pack(fill="x", side="bottom", pady=(8,0))
+
+        back_btn = self.button(actions, "Zurück", self.show_welcome, primary=False)
+        back_btn.pack(side="left")
+
+        install_btn = self.button(
+            actions,
+            "EnergyKit installieren",
+            self.start_install,
+            primary=True,
+            state="disabled"
+        )
         install_btn.pack(side="right")
         self.primary_action = install_btn
-        self.accept_var.trace_add("write", lambda *_: install_btn.config(state="normal" if self.accept_var.get() else "disabled"))
+
+        def sync_confirm(*_):
+            install_btn.config(state="normal" if self.accept_var.get() else "disabled")
+        self.accept_var.trace_add("write", sync_confirm)
 
     def show_progress(self):
         self.clear_body()
