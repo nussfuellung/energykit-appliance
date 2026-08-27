@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+
+chmod 0755 /usr/local/bin/energykit-installer
+chmod 0755 /usr/local/bin || true
+
+mkdir -p /etc/default
+cat > /etc/default/keyboard <<'EOF'
+XKBMODEL="pc105"
+XKBLAYOUT="de"
+XKBVARIANT=""
+XKBOPTIONS=""
+BACKSPACE="guess"
+EOF
+
+systemctl enable energykit-installer.service

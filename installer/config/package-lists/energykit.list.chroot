@@ -1,0 +1,14 @@
+curl
+ca-certificates
+xz-utils
+util-linux
+parted
+jq
+python3
+python3-yaml
+avahi-daemon
+iproute2
+pciutils
+smartmontools
+kbd
+isc-dhcp-client
