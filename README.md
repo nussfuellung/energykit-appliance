@@ -205,3 +205,14 @@ erfolgen nur noch, wenn keine UEFI-/El-Torito-Bootstruktur erkannt wird.
 Zusätzlich werden `/live`, sichtbare GRUB-/EFI-Dateien und der ISO-Root im
 GitHub-Log ausgegeben, damit unterschiedliche live-build-Strukturen direkt
 sichtbar sind.
+
+
+## v0.5.4 – Graphical Installer Layout Fix
+
+- kritischen Tkinter-Layoutfehler behoben (`pack_propagate(False)` ohne Höhe)
+- Installer-Panel wächst jetzt wieder mit seinem Inhalt
+- UniFi-artiges zentriertes Panel bleibt erhalten
+- reduzierte Header-/Footer-Höhe für kleinere VM-Auflösungen
+- Buttons erhalten sichtbaren Tastaturfokus
+- `Enter` löst weiterhin die primäre Aktion aus
+- GRUB-Konfiguration in diesem Fix bewusst unverändert

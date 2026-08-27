@@ -57,6 +57,8 @@ class Installer(tk.Tk):
         self.configure(bg=BG, cursor="arrow")
         self.title("EnergyKit Appliance Installer")
         self.attributes("-fullscreen", True)
+        self.minsize(900, 600)
+        self.update_idletasks()
         self.bind("<Escape>", lambda e: None)
         self.bind("<Return>", self._enter_key)
         self.bind("<KP_Enter>", self._enter_key)
@@ -109,8 +111,8 @@ class Installer(tk.Tk):
         sw = self.winfo_screenwidth()
         pad = max(28, min(52, sw // 28))
         self._pad = pad
-        self.header = tk.Frame(self, bg=BG, height=78)
-        self.header.pack(fill="x", padx=pad, pady=(18, 6))
+        self.header = tk.Frame(self, bg=BG, height=68)
+        self.header.pack(fill="x", padx=pad, pady=(12, 4))
         self.header.pack_propagate(False)
         if LOGO.exists():
             try:
@@ -121,13 +123,13 @@ class Installer(tk.Tk):
         meta = tk.Frame(self.header, bg=BG)
         meta.pack(side="right", anchor="n")
         tk.Label(meta, text="EnergyKit Appliance", fg=TEXT, bg=BG, font=("DejaVu Sans",13,"bold")).pack(anchor="e")
-        tk.Label(meta, text="Installer v0.5.3", fg=CYAN, bg=BG, font=self.font_small).pack(anchor="e", pady=(4,0))
+        tk.Label(meta, text="Installer v0.5.4", fg=CYAN, bg=BG, font=self.font_small).pack(anchor="e", pady=(4,0))
 
         self.body = tk.Frame(self, bg=BG)
         self.body.pack(fill="both", expand=True, padx=self._pad, pady=8)
 
-        self.footer = tk.Frame(self, bg=BG, height=54)
-        self.footer.pack(fill="x", padx=self._pad, pady=(0,14))
+        self.footer = tk.Frame(self, bg=BG, height=46)
+        self.footer.pack(fill="x", padx=self._pad, pady=(0,8))
         self.footer.pack_propagate(False)
         tk.Label(self.footer, text="↑↓ Auswahl  •  Enter Weiter  •  Maus unterstützt", fg="#587086", bg=BG, font=self.font_small).pack(side="left", pady=16)
         self.net_badge = tk.Label(self.footer, text="● Netzwerk wird geprüft", fg=MUTED, bg=BG, font=self.font_small)
@@ -141,9 +143,22 @@ class Installer(tk.Tk):
         host = parent or self.body
         outer = tk.Frame(host, bg=BG)
         outer.pack(fill="both", expand=True)
-        f = tk.Frame(outer, bg=PANEL, highlightbackground=LINE, highlightthickness=1, width=1080)
-        f.pack(fill="both", expand=True, padx=max(0, self.winfo_screenwidth()//18), pady=4)
-        f.pack_propagate(False)
+
+        # Do NOT disable geometry propagation here. The previous implementation
+        # used pack_propagate(False) without an explicit height, which collapsed
+        # the entire wizard content into a thin strip.
+        f = tk.Frame(
+            outer,
+            bg=PANEL,
+            highlightbackground=LINE,
+            highlightthickness=1
+        )
+
+        # Keep the UniFi-like centered appliance panel, but let Tk calculate its
+        # height from the actual contents.
+        side = max(18, min(110, self.winfo_screenwidth() // 18))
+        f.pack(fill="both", expand=True, padx=side, pady=(4, 8))
+
         inner = tk.Frame(f, bg=PANEL)
         inner.pack(fill="both", expand=True, padx=padx, pady=pady)
         return inner
@@ -151,16 +166,41 @@ class Installer(tk.Tk):
     def title_block(self, parent, eyebrow, title, subtitle):
         tk.Label(parent, text=eyebrow.upper(), fg=CYAN, bg=PANEL, font=("DejaVu Sans",9,"bold")).pack(anchor="w")
         tk.Label(parent, text=title, fg=TEXT, bg=PANEL, font=self.font_title).pack(anchor="w", pady=(8,5))
-        tk.Label(parent, text=subtitle, fg=MUTED, bg=PANEL, font=self.font_body, justify="left").pack(anchor="w")
+        tk.Label(
+            parent,
+            text=subtitle,
+            fg=MUTED,
+            bg=PANEL,
+            font=self.font_body,
+            justify="left",
+            anchor="w",
+            wraplength=max(680, self.winfo_screenwidth() - 360)
+        ).pack(anchor="w", fill="x")
 
     def button(self, parent, text, cmd, primary=True, state="normal"):
         bg = BLUE if primary else PANEL2
         active = "#006be0" if primary else "#15283b"
-        b = tk.Button(parent, text=text, command=cmd, state=state,
-                      fg="white" if primary else "#d8e1e9", bg=bg, activebackground=active,
-                      activeforeground="white", relief="flat", bd=0, padx=20, pady=11,
-                      cursor="hand2", font=self.font_button,
-                      disabledforeground="#67788a")
+        b = tk.Button(
+            parent,
+            text=text,
+            command=cmd,
+            state=state,
+            fg="white" if primary else "#d8e1e9",
+            bg=bg,
+            activebackground=active,
+            activeforeground="white",
+            relief="flat",
+            bd=0,
+            padx=20,
+            pady=10,
+            cursor="hand2",
+            font=self.font_button,
+            disabledforeground="#67788a",
+            takefocus=True,
+            highlightthickness=1,
+            highlightbackground=LINE,
+            highlightcolor=CYAN
+        )
         return b
 
     def set_network(self, ok, text):
@@ -222,6 +262,7 @@ class Installer(tk.Tk):
                                         state="normal" if self.disk_var.get() else "disabled")
         self.continue_btn.pack(side="right")
         self.primary_action = self.continue_btn
+        self.continue_btn.focus_set()
         self.disk_var.trace_add("write", lambda *_: self.continue_btn.config(state="normal" if self.disk_var.get() else "disabled"))
 
     def preflight_async(self):
@@ -284,6 +325,7 @@ class Installer(tk.Tk):
         self.button(actions, "Zurück", self.show_welcome, primary=False).pack(side="left")
         install_btn = self.button(actions, "EnergyKit installieren", self.start_install, primary=True, state="disabled")
         install_btn.pack(side="right")
+        self.primary_action = install_btn
         self.accept_var.trace_add("write", lambda *_: install_btn.config(state="normal" if self.accept_var.get() else "disabled"))
 
     def show_progress(self):
