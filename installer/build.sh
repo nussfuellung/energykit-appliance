@@ -54,6 +54,27 @@ if [[ -z "$ISO" ]]; then
   exit 1
 fi
 
+echo
+echo "== Prüfe UEFI/GRUB-Struktur im fertigen ISO =="
+command -v xorriso >/dev/null || { echo "FEHLER: xorriso fehlt."; exit 1; }
+ISO_LIST="$(xorriso -indev "$ISO" -find / -type f -print 2>/dev/null || true)"
+printf '%s\n' "$ISO_LIST" | grep -Eqi '/EFI/BOOT/BOOTX64\.EFI$' || {
+  echo "FEHLER: EFI/BOOT/BOOTX64.EFI fehlt im ISO."; exit 1;
+}
+printf '%s\n' "$ISO_LIST" | grep -Eqi '/boot/grub/config\.cfg$' || {
+  echo "FEHLER: /boot/grub/config.cfg fehlt im ISO."; exit 1;
+}
+printf '%s\n' "$ISO_LIST" | grep -Eqi '/boot/grub/live-theme/theme\.txt$' || {
+  echo "FEHLER: EnergyKit GRUB Theme fehlt im ISO."; exit 1;
+}
+printf '%s\n' "$ISO_LIST" | grep -Eqi '/live/vmlinuz' || {
+  echo "FEHLER: Live-Kernel fehlt im ISO."; exit 1;
+}
+printf '%s\n' "$ISO_LIST" | grep -Eqi '/live/initrd' || {
+  echo "FEHLER: Live-initrd fehlt im ISO."; exit 1;
+}
+echo "UEFI/GRUB-Struktur: OK"
+
 OUTPUT_ISO="../energykit-installer-amd64.iso"
 OUTPUT_SHA="../energykit-installer-amd64.iso.sha256"
 

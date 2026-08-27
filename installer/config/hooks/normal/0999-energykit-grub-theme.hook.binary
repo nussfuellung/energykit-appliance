@@ -1,35 +1,10 @@
 #!/bin/sh
-set -e
+set -eu
 
-# live-build may generate BIOS and UEFI GRUB trees through different paths.
-# Copy the EnergyKit theme into each generated GRUB tree if it exists.
+# Keep generated live-build GRUB configuration intact. Only install theme assets
+# into GRUB trees that live-build actually created.
 for GRUBROOT in binary/boot/grub binary/EFI/boot/grub binary/EFI/BOOT/grub; do
     [ -d "$GRUBROOT" ] || continue
     mkdir -p "$GRUBROOT/live-theme"
-    if [ -d config/bootloaders/grub-efi/live-theme ]; then
-        cp -a config/bootloaders/grub-efi/live-theme/. "$GRUBROOT/live-theme/"
-    elif [ -d config/bootloaders/grub-pc/live-theme ]; then
-        cp -a config/bootloaders/grub-pc/live-theme/. "$GRUBROOT/live-theme/"
-    fi
-done
-
-# Prefix generated GRUB configs with theme initialization.
-find binary -type f \( -name grub.cfg -o -name config.cfg \) 2>/dev/null | while read -r CFG; do
-    grep -q "EnergyKit theme bootstrap" "$CFG" && continue
-    TMP="${CFG}.ek"
-    cat > "$TMP" <<'EOF'
-# EnergyKit theme bootstrap
-if loadfont /boot/grub/dejavu-bold-16.pf2 ; then
-  set gfxmode=auto
-  insmod all_video
-  insmod gfxterm
-  terminal_output gfxterm
-fi
-if [ -f /boot/grub/live-theme/theme.txt ]; then
-  set theme=/boot/grub/live-theme/theme.txt
-  export theme
-fi
-EOF
-    cat "$CFG" >> "$TMP"
-    mv "$TMP" "$CFG"
+    cp -a config/bootloaders/grub-efi/live-theme/. "$GRUBROOT/live-theme/"
 done
