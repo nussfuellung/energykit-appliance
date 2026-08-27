@@ -140,3 +140,16 @@ Siehe:
 - `docs/TESTPLAN.md`
 
 v0.4.1 fügt außerdem nach dem ISO-Build einen formalen Artifact-Check inklusive SHA-256-Verifikation hinzu. Das ersetzt keinen echten UEFI-Boot-Test.
+
+
+## v0.5.0 Wizard Alpha
+
+- geführter 9-Schritt-Inbetriebnahme-Wizard statt One-Pager
+- eigene Modals, Toasts, Lade- und Fortschrittszustände
+- Diagnoseansicht für Supervisor/Core/WebSocket
+- korrigierte Config-Flow-Domains (`sigen`, `deye_modbus`)
+- idempotenter Dashboard-Pfad `energykit-dashboard`
+- HAOS-Preseed legt `apps/data/local_energykit` an
+- Installer setzt Execute-Bit explizit
+- deutsches Konsolenlayout im Installer
+- Netzwerk-/DHCP-Preflight vor HAOS-Download
