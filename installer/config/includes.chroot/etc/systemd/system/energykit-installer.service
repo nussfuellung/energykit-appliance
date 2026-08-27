@@ -1,0 +1,18 @@
+[Unit]
+Description=EnergyKit HAOS Installer
+Conflicts=getty@tty1.service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/energykit-installer
+StandardInput=tty
+StandardOutput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+lb config noauto \
+  --mode debian \
+  --distribution bookworm \
+  --architectures amd64 \
+  --binary-images iso-hybrid \
+  --bootappend-live "boot=live components username=energykit hostname=energykit-installer" \
+  --iso-application "EnergyKit Appliance Installer" \
+  --iso-publisher "EnergyKit" \
+  --iso-volume "ENERGYKIT"

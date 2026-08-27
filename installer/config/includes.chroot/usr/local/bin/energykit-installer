@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+import hashlib
+import json
+import os
+import secrets
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+import yaml
+
+HAOS_VERSION = os.environ.get("ENERGYKIT_HAOS_VERSION", "18.2")
+IMAGE = f"haos_generic-x86-64-{HAOS_VERSION}.img.xz"
+API = f"https://api.github.com/repos/home-assistant/operating-system/releases/tags/{HAOS_VERSION}"
+TMP = Path("/tmp") / IMAGE
+PRELOAD = Path("/opt/energykit-preload/energykit")
+MOUNT = Path("/mnt/energykit-haos-data")
+
+
+def run(*args, check=True, capture=True, timeout=None):
+    return subprocess.run(args, text=True, capture_output=capture, check=check, timeout=timeout)
+
+
+def disks():
+    data = json.loads(run("lsblk", "-J", "-b", "-o", "NAME,PATH,SIZE,TYPE,MODEL,TRAN,RM,MOUNTPOINTS").stdout)
+    out = []
+    for disk in data["blockdevices"]:
+        if disk.get("type") != "disk":
+            continue
+        mounts = disk.get("mountpoints") or []
+        # Do not offer the boot medium / removable USB installer.
+        if disk.get("rm") or any(m for m in mounts if m):
+            continue
+        out.append(disk)
+    return out
+
+
+def human(value):
+    return f"{value / 1024**3:.1f} GiB"
+
+
+def download_release():
+    print(f"\nErmittle offizielles HAOS {HAOS_VERSION} …")
+    req = urllib.request.Request(API, headers={"User-Agent": "EnergyKit"})
+    with urllib.request.urlopen(req, timeout=30) as response:
+        release = json.load(response)
+    asset = next(a for a in release["assets"] if a["name"] == IMAGE)
+    digest = asset.get("digest") or ""
+    expected = digest.split(":", 1)[1] if digest.startswith("sha256:") else None
+    if not expected:
+        raise RuntimeError("GitHub Release enthält keinen SHA-256 Digest für das HAOS-Image")
+    print(f"Lade {IMAGE} …")
+    urllib.request.urlretrieve(asset["browser_download_url"], TMP)
+    actual = hashlib.sha256(TMP.read_bytes()).hexdigest()
+    if actual.lower() != expected.lower():
+        raise RuntimeError("SHA-256 des HAOS-Images stimmt nicht")
+    print("✓ HAOS-Image verifiziert")
+
+
+def flash(target):
+    print(f"\nSchreibe HAOS auf {target} …")
+    p1 = subprocess.Popen(["xz", "-dc", str(TMP)], stdout=subprocess.PIPE)
+    p2 = subprocess.Popen(["dd", f"of={target}", "bs=16M", "conv=fsync", "status=progress"], stdin=p1.stdout)
+    assert p1.stdout is not None
+    p1.stdout.close()
+    rc2 = p2.wait()
+    rc1 = p1.wait()
+    if rc1 or rc2:
+        raise RuntimeError("HAOS konnte nicht auf die Zieldisk geschrieben werden")
+    run("sync", capture=False)
+    run("partprobe", target, check=False)
+    run("udevadm", "settle", check=False)
+    time.sleep(2)
+
+
+def find_data_partition(target):
+    # Prefer filesystem label, then restrict fallback to partitions belonging to target.
+    label = Path("/dev/disk/by-label/hassos-data")
+    if label.exists():
+        return str(label.resolve())
+    info = json.loads(run("lsblk", "-J", "-o", "PATH,TYPE,LABEL", target).stdout)
+    stack = list(info.get("blockdevices", []))
+    while stack:
+        node = stack.pop(0)
+        if node.get("type") == "part" and node.get("label") == "hassos-data":
+            return node["path"]
+        stack.extend(node.get("children") or [])
+    raise RuntimeError("hassos-data Partition wurde nach dem Flashen nicht gefunden")
+
+
+def preseed(target):
+    if not PRELOAD.joinpath("config.yaml").exists():
+        raise RuntimeError("EnergyKit Preload fehlt im Installer-Image")
+    data_part = find_data_partition(target)
+    print(f"\nProvisioniere EnergyKit in {data_part} …")
+    MOUNT.mkdir(parents=True, exist_ok=True)
+    run("mount", data_part, str(MOUNT), capture=False)
+    try:
+        supervisor = MOUNT / "supervisor"
+        local_app = supervisor / "apps" / "local" / "energykit"
+        local_app.mkdir(parents=True, exist_ok=True)
+        for src in PRELOAD.iterdir():
+            dst = local_app / src.name
+            if src.is_dir():
+                if dst.exists(): shutil.rmtree(dst)
+                shutil.copytree(src, dst)
+            else:
+                shutil.copy2(src, dst)
+
+        config = yaml.safe_load((local_app / "config.yaml").read_text())
+        if not config.get("image") or "__IMAGE_BASE__" in config["image"]:
+            raise RuntimeError("EnergyKit Image-URL wurde beim ISO-Build nicht gerendert")
+        if "__REPOSITORY_URL__" in str(config.get("url", "")):
+            raise RuntimeError("EnergyKit Repository-URL wurde beim ISO-Build nicht gerendert")
+
+        slug = config["slug"]
+        installed_slug = f"local_{slug}"
+        system_cfg = dict(config)
+        system_cfg["repository"] = "local"
+        system_cfg["translations"] = {}
+        resolved_image = config["image"].replace("{arch}", "amd64")
+        user_cfg = {
+            "version": str(config["version"]),
+            "image": resolved_image,
+            "uuid": secrets.token_hex(16),
+            "access_token": secrets.token_hex(32),
+            "ingress_token": secrets.token_urlsafe(32),
+            "options": dict(config.get("options") or {}),
+            "auto_update": False,
+            "boot": "auto",
+            "protected": True,
+            "ingress_panel": True,
+            "watchdog": False,
+            "system_managed": False,
+        }
+
+        apps_file = supervisor / "apps.json"
+        data = {"user": {}, "system": {}}
+        if apps_file.exists():
+            try:
+                data = json.loads(apps_file.read_text())
+            except Exception:
+                pass
+        data.setdefault("user", {})[installed_slug] = user_cfg
+        data.setdefault("system", {})[installed_slug] = system_cfg
+        apps_file.parent.mkdir(parents=True, exist_ok=True)
+        apps_file.write_text(json.dumps(data, indent=2) + "\n")
+        os.chmod(apps_file, 0o600)
+
+        marker = supervisor / "energykit-preseed.json"
+        marker.write_text(json.dumps({
+            "energykit_version": config["version"],
+            "haos_version": HAOS_VERSION,
+            "image": resolved_image,
+            "installed_slug": installed_slug,
+            "mode": "local-app-preseed",
+        }, indent=2) + "\n")
+        print("✓ EnergyKit als installierte lokale HAOS-App vorgemerkt")
+        print("✓ Supervisor wird das gepinnte EnergyKit-Image beim ersten Start laden")
+    finally:
+        run("sync", capture=False)
+        run("umount", str(MOUNT), capture=False)
+
+
+def main():
+    os.system("clear")
+    print("EnergyKit Appliance Installer 0.4")
+    print("================================\n")
+    print("Installiert offizielles Home Assistant OS und provisioniert EnergyKit")
+    print("direkt in der HAOS-Datenpartition. Kein manuelles App-Repository nötig.\n")
+    print("ACHTUNG: Die gewählte Zieldisk wird vollständig überschrieben.\n")
+    ds = disks()
+    if not ds:
+        print("Keine geeignete interne Zieldisk gefunden.")
+        sys.exit(2)
+    for i, disk in enumerate(ds, 1):
+        print(f" {i}) {disk['path']}  {human(disk['size'])}  {disk.get('model') or ''}")
+    try:
+        idx = int(input("\nZieldisk auswählen: ")) - 1
+        target = ds[idx]["path"]
+    except Exception:
+        print("Ungültige Auswahl")
+        sys.exit(2)
+    if input(f"Zum Löschen von {target} exakt INSTALLIEREN eingeben: ") != "INSTALLIEREN":
+        print("Abgebrochen.")
+        return
+    try:
+        download_release()
+        flash(target)
+        preseed(target)
+    except Exception as exc:
+        print(f"\nFEHLER: {exc}")
+        sys.exit(5)
+
+    print("\n✓ EnergyKit Appliance wurde vorbereitet.\n")
+    print("Nach dem Neustart:")
+    print("  1. http://homeassistant.local:8123 öffnen")
+    print("  2. Home-Assistant-Owner anlegen")
+    print("  3. EnergyKit erscheint automatisch unter Einstellungen → Apps")
+    print("     und sollte durch boot:auto automatisch gestartet werden")
+    print("  4. EnergyKit über die Seitenleiste öffnen und Inbetriebnahme durchführen")
+    print("\nHinweis: Der allererste Start benötigt Internet, damit Supervisor das")
+    print("Home-Assistant-Core- und EnergyKit-Containerimage laden kann.")
+    input("\nEnter zum Herunterfahren …")
+    run("poweroff", capture=False, check=False)
+
+
+if __name__ == "__main__":
+    main()

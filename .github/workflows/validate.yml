@@ -1,0 +1,31 @@
+name: Validate EnergyKit
+on:
+  push:
+  pull_request:
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install pyyaml
+      - name: Python syntax
+        run: python -m py_compile energykit/app/main.py energykit/app/bundled/energykit_bridge/*.py installer/config/includes.chroot/usr/local/bin/energykit-installer
+      - name: Shell syntax
+        run: bash -n installer/build.sh scripts/render-release.sh
+      - name: Validate metadata
+        run: |
+          python - <<'PY'
+          import yaml
+          from pathlib import Path
+          cfg=yaml.safe_load(Path('energykit/config.yaml').read_text())
+          assert cfg['slug']=='energykit'
+          assert cfg['arch']==['amd64']
+          assert cfg['image']=='__IMAGE_BASE__'
+          assert cfg['hassio_api'] is True
+          assert cfg['homeassistant_api'] is True
+          assert cfg['ingress'] is True
+          print('metadata ok')
+          PY

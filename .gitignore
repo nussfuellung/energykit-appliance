@@ -1,0 +1,8 @@
+*.iso
+*.iso.sha256
+installer/.build*
+installer/cache/
+installer/chroot/
+installer/binary/
+__pycache__/
+*.pyc
