@@ -43,11 +43,11 @@ jobs:
         env:
           ENERGYKIT_GHCR_OWNER: ${{ github.repository_owner }}
           ENERGYKIT_REPOSITORY_URL: https://github.com/${{ github.repository }}
-        run: ./scripts/render-release.sh
+        run: bash ./scripts/render-release.sh
       - name: Install live-build
         run: sudo apt-get update && sudo apt-get install -y live-build xorriso isolinux syslinux-common
       - name: Build ISO
-        run: sudo ./installer/build.sh
+        run: sudo bash ./installer/build.sh
 
       - name: Verify ISO artifact
         shell: bash
