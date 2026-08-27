@@ -188,3 +188,11 @@ v0.4.1 fügt außerdem nach dem ISO-Build einen formalen Artifact-Check inklusiv
 - expliziter libinput/QXL/SPICE-Input-Stack für virt-manager
 - GRUB-Theme jetzt für `grub-pc` **und** `grub-efi`
 - Binary-Hook injiziert Theme auch in von live-build generierte UEFI-GRUB-Konfigurationen
+
+
+## ISO UEFI sanity-check fix
+
+`live-build` kann den UEFI-Bootloader in einem eingebetteten EFI-/El-Torito-Image
+ablegen. Der Build verlangt `EFI/BOOT/BOOTX64.EFI` deshalb nicht mehr als
+sichtbare ISO9660-Datei. Stattdessen wird die El-Torito-/UEFI-Bootstruktur mit
+`xorriso -report_el_torito` geprüft. Kernel und initrd bleiben harte Checks.
