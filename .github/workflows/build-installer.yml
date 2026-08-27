@@ -63,22 +63,20 @@ jobs:
     needs: image
     runs-on: ubuntu-24.04
 
-    container:
-      image: debian:bookworm
-
     steps:
-      - name: Install build dependencies
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install ISO build dependencies
         shell: bash
         run: |
           set -euo pipefail
 
-          apt-get update
+          sudo apt-get update
 
-          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             git \
-            ca-certificates \
-            curl \
-            live-build \
+            make \
             debootstrap \
             squashfs-tools \
             xorriso \
@@ -88,26 +86,45 @@ jobs:
             grub-efi-amd64-bin \
             mtools \
             dosfstools \
+            curl \
+            ca-certificates \
             file
 
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Install current live-build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf /tmp/live-build
+
+          git clone --depth 1 \
+            https://salsa.debian.org/live-team/live-build.git \
+            /tmp/live-build
+
+          cd /tmp/live-build
+
+          sudo make install
 
       - name: Show build environment
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "=== OS ==="
+          echo "=== Runner OS ==="
           cat /etc/os-release
 
           echo
           echo "=== live-build ==="
+          which lb
           lb --version || true
 
           echo
           echo "=== debootstrap ==="
           debootstrap --version || true
+
+          echo
+          echo "=== xorriso ==="
+          xorriso -version || true
 
       - name: Render release-specific app metadata
         shell: bash
@@ -127,16 +144,28 @@ jobs:
           cat energykit/config.yaml
 
           echo
-          echo "=== preloaded config.yaml ==="
+          echo "=== preloaded EnergyKit config ==="
+
           if [[ -f installer/preload/energykit/config.yaml ]]; then
             cat installer/preload/energykit/config.yaml
+          fi
+
+          echo
+          echo "=== Security sources ==="
+
+          if [[ -f installer/config/archives/security.list.chroot ]]; then
+            cat installer/config/archives/security.list.chroot
+          fi
+
+          if [[ -f installer/config/archives/security.list.binary ]]; then
+            cat installer/config/archives/security.list.binary
           fi
 
       - name: Build ISO
         shell: bash
         run: |
           set -euo pipefail
-          bash ./installer/build.sh
+          sudo bash ./installer/build.sh
 
       - name: Verify ISO artifact
         shell: bash
@@ -154,7 +183,7 @@ jobs:
           file energykit-installer-amd64.iso
 
           echo
-          echo "=== File size ==="
+          echo "=== ISO size ==="
           du -h energykit-installer-amd64.iso
 
           echo
@@ -168,6 +197,7 @@ jobs:
             energykit-installer-amd64.iso
             energykit-installer-amd64.iso.sha256
           if-no-files-found: error
+          retention-days: 14
 
       - name: Attach ISO to GitHub release
         if: startsWith(github.ref, 'refs/tags/')
