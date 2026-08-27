@@ -2,7 +2,8 @@
 set -e
 
 chmod 0755 /usr/local/bin/energykit-installer
-chmod 0755 /usr/local/bin || true
+chmod 0755 /usr/local/bin/energykit-installer-gui
+chmod 0755 /usr/local/bin/energykit-installer-session
 
 mkdir -p /etc/default
 cat > /etc/default/keyboard <<'EOF'

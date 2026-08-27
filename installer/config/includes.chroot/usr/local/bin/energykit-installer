@@ -155,11 +155,17 @@ def preseed(target):
         system_cfg["repository"] = "local"
         system_cfg["translations"] = {}
         resolved_image = config["image"].replace("{arch}", "amd64")
+        supervisor_token = secrets.token_hex(64)
+        # Store the token in Supervisor's normal app user config and also in a
+        # separate environment variable. The latter is a fallback for preseeded
+        # local apps where Supervisor may not inject SUPERVISOR_TOKEN on the
+        # first container creation.
+        system_cfg.setdefault("environment", {})["ENERGYKIT_SUPERVISOR_TOKEN"] = supervisor_token
         user_cfg = {
             "version": str(config["version"]),
             "image": resolved_image,
             "uuid": secrets.token_hex(16),
-            "access_token": secrets.token_hex(32),
+            "access_token": supervisor_token,
             "ingress_token": secrets.token_urlsafe(32),
             "options": dict(config.get("options") or {}),
             "auto_update": False,

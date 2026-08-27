@@ -20,9 +20,9 @@ import websockets
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.5.2"
 SUPERVISOR = "http://supervisor"
-TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
+TOKEN = os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("ENERGYKIT_SUPERVISOR_TOKEN", "")
 DATA = Path("/config")
 HA = Path("/homeassistant")
 ADDON_CONFIGS = Path("/addon_configs")
@@ -48,6 +48,7 @@ DEFAULT_STATE: dict[str, Any] = {
     "dashboard": {"installed": False},
     "last_backup": None,
     "last_checks": [],
+    "restart_required": False,
 }
 
 
@@ -79,8 +80,20 @@ def save_state(state: dict[str, Any]) -> None:
     tmp.replace(STATE_FILE)
 
 
+def require_supervisor_token() -> str:
+    if not TOKEN:
+        raise HTTPException(
+            503,
+            "EnergyKit hat keinen Supervisor-Token erhalten. "
+            "Die Appliance muss mit dem aktuellen EnergyKit-Preseed installiert "
+            "oder EnergyKit danach neu installiert werden."
+        )
+    return TOKEN
+
+
 def sup_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
+    token = require_supervisor_token()
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 
 async def sup(method: str, path: str, **kwargs):
@@ -99,16 +112,20 @@ async def core_rest(method: str, path: str, **kwargs):
 
 
 async def core_ws(commands: list[dict[str, Any]]) -> list[Any]:
+    token = require_supervisor_token()
     uri = "ws://supervisor/core/websocket"
     out: list[Any] = []
     async with websockets.connect(uri, open_timeout=15) as ws:
         hello = json.loads(await ws.recv())
         if hello.get("type") != "auth_required":
-            raise RuntimeError("Home Assistant WebSocket nicht bereit")
-        await ws.send(json.dumps({"type": "auth", "access_token": TOKEN}))
+            raise RuntimeError(f"Home Assistant WebSocket nicht bereit: {hello}")
+        await ws.send(json.dumps({"type": "auth", "access_token": token}))
         auth = json.loads(await ws.recv())
         if auth.get("type") != "auth_ok":
-            raise RuntimeError("Home Assistant WebSocket Auth fehlgeschlagen")
+            raise RuntimeError(
+                f"Home Assistant WebSocket Auth fehlgeschlagen: "
+                f"{auth.get('message') or auth.get('type')}"
+            )
         for idx, cmd in enumerate(commands, 1):
             await ws.send(json.dumps({"id": idx, **cmd}))
             while True:
@@ -189,8 +206,9 @@ async def install_component_impl(name: str, state: dict[str, Any]):
     if name == "bridge":
         version = copy_bridge()
         state["components"][name] = {"version": version, "installed_at": now_iso()}
+        state["restart_required"] = True
         save_state(state)
-        return {"version": version}
+        return {"version": version, "restart_required": True}
 
     with tempfile.TemporaryDirectory() as td0:
         td = Path(td0)
@@ -232,24 +250,29 @@ async def install_component_impl(name: str, state: dict[str, Any]):
             shutil.copytree(src, target)
             version = "main"
         elif name == "visionos":
-            await download("https://github.com/Nezz/homeassistant-visionos-theme/archive/refs/heads/main.zip", zpath)
+            rel = await github_latest("Nezz/homeassistant-visionos-theme")
+            await download(rel["zipball_url"], zpath)
             with zipfile.ZipFile(zpath) as z:
                 safe_extract(z, ex)
             target = HA / "themes/energykit-visionos"
+            if target.exists():
+                shutil.rmtree(target)
             target.mkdir(parents=True, exist_ok=True)
             copied = 0
             for f in ex.rglob("*.yaml"):
-                if "theme" in str(f.parent).lower() or "vision" in f.name.lower() or "ios" in f.name.lower():
+                if "themes" in [p.lower() for p in f.parts] or "vision" in f.name.lower() or "liquid" in f.name.lower():
                     shutil.copy2(f, target / f.name)
                     copied += 1
             if not copied:
-                raise HTTPException(500, "Keine Theme-YAML gefunden")
-            version = "main"
+                raise HTTPException(500, "Keine VisionOS-Theme-YAML im aktuellen Release gefunden")
+            version = rel["tag_name"]
         else:
             raise HTTPException(404, "Unbekannte Komponente")
     state["components"][name] = {"version": version, "installed_at": now_iso()}
+    if name in ("sigenergy", "deye", "bridge"):
+        state["restart_required"] = True
     save_state(state)
-    return {"version": version}
+    return {"version": version, "restart_required": bool(state.get("restart_required"))}
 
 
 async def all_states() -> list[dict[str, Any]]:
@@ -552,7 +575,7 @@ input:focus,select:focus{border-color:#80b8ff;box-shadow:0 0 0 3px rgba(0,111,25
 .callout{border-radius:9px;padding:13px 14px;background:#f3f7fc;color:#526174;border:1px solid #e0eaf5;line-height:1.45;margin:14px 0}.callout.warn{background:var(--amber-soft);border-color:#f3dfb4;color:#76501a}
 .devicegrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.device{border:1px solid var(--line);border-radius:10px;padding:16px;background:#fff}.device h3{margin:9px 0 4px}.device small{color:#7b8592}
 .progress{height:6px;background:#edf0f3;border-radius:99px;overflow:hidden}.progress i{display:block;height:100%;background:var(--blue);transition:width .3s}
-.step{display:none}.step.active{display:block}
+.step{display:none}.step.active{display:block}.hidden{display:none!important}
 .footerbar{position:fixed;bottom:0;left:244px;right:0;height:72px;background:rgba(255,255,255,.94);backdrop-filter:blur(14px);border-top:1px solid var(--line);z-index:15}
 .footerinner{height:100%;max-width:920px;margin:auto;padding:0 34px;display:flex;align-items:center;justify-content:space-between}
 .toaststack{position:fixed;right:22px;top:78px;z-index:100;display:flex;flex-direction:column;gap:9px;width:min(360px,calc(100vw - 44px))}
@@ -589,7 +612,14 @@ async function createService(btn){if(!await modal('Service-Zugang anlegen','Ener
 async function discover(btn){const box=byId('devices');box.innerHTML='<div class="callout">Suche im Netzwerk …</div>';const d=await action(btn,()=>api('api/discover'),'Gerätesuche abgeschlossen');box.innerHTML=d.devices.map(x=>`<div class="device"><span class="status">${esc(d.mode)}</span><h3>${esc(x.vendor)}</h3><p>${esc(x.model)}</p><small>${esc(x.host)} · ${esc((x.ports||[]).join(', '))}</small><div class="actions left"><button class="btn secondary" onclick="useDevice('${esc(x.vendor)}','${esc(x.host)}',${x.port||x.ports?.[0]||502})">Verwenden</button></div></div>`).join('')||'<div class="callout">Keine Geräte gefunden.</div>'}
 function useDevice(v,h,p){byId('vendor').value=v.toLowerCase().includes('deye')?'deye':'sigenergy';byId('host').value=h;byId('port').value=p;toast('Gerät übernommen')}
 async function saveDevice(btn){await action(btn,()=>api('api/device',{method:'POST',body:fd({vendor:byId('vendor').value,host:byId('host').value,port:byId('port').value})}),'Energiesystem gespeichert')}
-async function installComp(n,btn){const d=await action(btn,()=>api(`api/components/${n}`,{method:'POST'}),x=>`${n}: ${x.version||'installiert'}`);return d}
+async function installComp(n,btn){
+  const d=await action(btn,()=>api(`api/components/${n}`,{method:'POST'}),x=>`${n}: ${x.version||'installiert'}`);
+  if(d.restart_required){
+    byId('integrationRestartNotice')?.classList.remove('hidden');
+    toast('Home Assistant Neustart erforderlich','bad',6500);
+  }
+  return d
+}
 async function installBase(btn){setBusy(btn,true,'Installiere …');try{for(const [i,n] of ['mushroom','visionos','bridge'].entries()){byId('baseProgress').style.width=`${i*33}%`;byId('baseStatus').textContent=`Installiere ${n} …`;await api(`api/components/${n}`,{method:'POST'});byId('baseProgress').style.width=`${(i+1)*33}%`}byId('baseProgress').style.width='100%';byId('baseStatus').textContent='Basis installiert. Home Assistant muss neu gestartet werden.';toast('Basis-Komponenten installiert')}catch(e){toast(e.message,'bad',7000)}finally{setBusy(btn,false)}}
 async function restartCore(btn){if(!await modal('Home Assistant neu starten','Home Assistant Core wird neu gestartet. EnergyKit bleibt geöffnet, einige API-Aufrufe sind für kurze Zeit nicht verfügbar.','Neu starten'))return;await action(btn,()=>api('api/core/restart',{method:'POST'}),'Neustart ausgelöst');byId('restartState').textContent='Home Assistant startet neu …';for(let i=0;i<30;i++){await new Promise(r=>setTimeout(r,2000));try{await api('api/system');byId('restartState').textContent='Home Assistant ist wieder erreichbar.';toast('Home Assistant wieder online');return}catch(e){}}byId('restartState').textContent='Neustart läuft länger als erwartet.'}
 async function startFlow(domain,btn){const d=await action(btn,()=>api(`api/flow/start/${domain}`,{method:'POST'}));renderFlow(d)}
@@ -666,6 +696,7 @@ def page(state: dict[str, Any]) -> str:
 <div class='eyebrow'>ENERGIESYSTEM</div><h1 class='title'>Wechselrichter & Speicher</h1><p class='subtitle'>Gerät finden, Integration installieren und den echten Home-Assistant-Config-Flow durchlaufen.</p>
 <div class='panel'><div class='panelhead'><div><h3>Geräteerkennung</h3><p>Im Simulationsmodus werden Testgeräte angeboten.</p></div><button class='btn secondary' onclick='discover(this)'>Geräte suchen</button></div><div id='devices' class='devicegrid'></div></div>
 <div class='panel grid2'><label>Hersteller<select id='vendor'>{select_option("sigenergy",e.get("vendor"),"Sigenergy")}{select_option("deye",e.get("vendor"),"Deye")}</select></label><label>IP / Host<input id='host' value='{h(e.get("host"))}' placeholder='192.168.1.50'></label><label>Port<input id='port' type='number' value='{h(e.get("port") or 502)}'></label><div></div><div class='span2 actions'><button class='btn secondary' onclick='saveDevice(this)'>Gerät speichern</button><button class='btn secondary' onclick="installComp('sigenergy',this)">Sigenergy Integration installieren</button><button class='btn secondary' onclick="installComp('deye',this)">Deye Integration installieren</button></div></div>
+<div id='integrationRestartNotice' class='callout warn {'hidden' if not state.get("restart_required") else ''}'><b>Neustart erforderlich.</b> Home Assistant muss die neu installierten Custom Integrations erst laden.<div class='actions left'><button class='btn' onclick='restartCore(this)'>Home Assistant jetzt neu starten</button></div></div>
 <div class='panel'><div class='panelhead'><div><h3>Home Assistant Config Flow</h3><p>Sigenergy verwendet den Domain-Handler <code>sigen</code>, Deye <code>deye_modbus</code>.</p></div></div><div class='actions left'><button class='btn' onclick="startFlow('sigenergy',this)">Sigenergy konfigurieren</button><button class='btn secondary' onclick="startFlow('deye',this)">Deye konfigurieren</button></div><div id='flow'></div></div>
 </section>
 
@@ -736,6 +767,7 @@ async def system_info(request: Request):
     info = await sup("GET", "/info")
     addons = await sup("GET", "/addons")
     return {
+        "Supervisor Token": "verfügbar" if TOKEN else "FEHLT",
         "HAOS": info.get("hassos"),
         "Home Assistant": info.get("homeassistant"),
         "Supervisor": info.get("supervisor"),
@@ -828,9 +860,21 @@ async def install_component(request: Request, name: str):
 
 @app.post("/api/core/restart")
 async def restart_core(request: Request):
-    ensure_access(request)
+    state = ensure_access(request)
     await sup("POST", "/core/restart", json={})
-    return {"ok": True}
+    # Wait for Core to disappear and return.
+    await asyncio.sleep(3)
+    last_error = None
+    for _ in range(60):
+        try:
+            await core_rest("GET", "/config")
+            state["restart_required"] = False
+            save_state(state)
+            return {"ok": True, "ready": True}
+        except Exception as exc:
+            last_error = str(exc)
+            await asyncio.sleep(2)
+    raise HTTPException(504, f"Home Assistant kam nach dem Neustart nicht rechtzeitig zurück: {last_error}")
 
 
 @app.post("/api/flow/start/{domain}")
@@ -844,6 +888,11 @@ async def flow_start(request: Request, domain: str):
         "energykit_bridge": "energykit_bridge",
     }
     handler = domain_map.get(domain, domain)
+    if state.get("restart_required") and not state["simulation"]:
+        raise HTTPException(
+            409,
+            "Home Assistant muss nach der Installation der Custom Integration zuerst neu gestartet werden."
+        )
     if state["simulation"]:
         return {"type": "create_entry", "title": f"Simulation {handler}", "result": {}, "handler": handler}
     try:
@@ -943,8 +992,9 @@ async def evcc_install(request: Request):
     try:
         await sup("POST", "/store/repositories", json={"repository": repo})
     except HTTPException as exc:
+        # Already-added repositories may answer 400/409.
         if exc.status_code not in (400, 409):
-            raise
+            raise HTTPException(exc.status_code, f"evcc Repository konnte nicht hinzugefügt werden: {exc.detail}")
     try:
         await sup("POST", "/store/reload", json={})
     except Exception:
@@ -1020,6 +1070,10 @@ DASHBOARD = {"views": [
 @app.post("/api/dashboard")
 async def dashboard(request: Request):
     state = ensure_access(request)
+    if "mushroom" not in state.get("components", {}):
+        raise HTTPException(409, "Mushroom muss vor dem Dashboard installiert werden")
+    if state.get("restart_required") and not state["simulation"]:
+        raise HTTPException(409, "Home Assistant muss vor dem Dashboard zuerst neu gestartet werden")
     (DATA / "dashboard.json").write_text(json.dumps(DASHBOARD, indent=2))
     try:
         resources = (await core_ws([{"type": "lovelace/resources"}]))[0] or []
@@ -1045,6 +1099,11 @@ async def diagnostics(request: Request):
     state = ensure_access(request)
     result = {
         "supervisor_token": bool(TOKEN),
+        "supervisor_token_source": (
+            "SUPERVISOR_TOKEN" if os.environ.get("SUPERVISOR_TOKEN")
+            else "ENERGYKIT_SUPERVISOR_TOKEN" if os.environ.get("ENERGYKIT_SUPERVISOR_TOKEN")
+            else None
+        ),
         "homeassistant_config_mounted": HA.exists(),
         "addon_configs_mounted": ADDON_CONFIGS.exists(),
         "service_user": bool(state.get("service_user_id")),

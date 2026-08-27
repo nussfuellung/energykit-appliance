@@ -1,5 +1,5 @@
 name: EnergyKit
-version: "0.5.0"
+version: "0.5.2"
 slug: energykit
 description: Geführte Inbetriebnahme, Diagnose und Komponentenverwaltung für Energiesysteme.
 url: __REPOSITORY_URL__
@@ -24,7 +24,7 @@ map:
   - type: app_config
     read_only: false
     path: /config
-  - type: all_addon_configs
+  - type: all_app_configs
     read_only: false
     path: /addon_configs
 options:

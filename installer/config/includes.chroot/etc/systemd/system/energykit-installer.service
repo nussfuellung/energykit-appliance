@@ -1,19 +1,18 @@
 [Unit]
-Description=EnergyKit HAOS Installer
+Description=EnergyKit Graphical HAOS Installer
 Conflicts=getty@tty1.service
-After=network-online.target
-Wants=network-online.target
+After=systemd-user-sessions.service network.target
+Wants=network.target
 
 [Service]
 Type=simple
+Environment=HOME=/root
 ExecStartPre=-/usr/bin/loadkeys de
-ExecStart=/usr/local/bin/energykit-installer
-StandardInput=tty
-StandardOutput=tty
-TTYPath=/dev/tty1
-TTYReset=yes
-TTYVHangup=yes
+ExecStart=/usr/local/bin/energykit-installer-session
 Restart=on-failure
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

@@ -1,0 +1,438 @@
+#!/usr/bin/env python3
+import hashlib
+import json
+import os
+import secrets
+import shutil
+import subprocess
+import threading
+import time
+import urllib.request
+from pathlib import Path
+import tkinter as tk
+from tkinter import ttk
+
+import yaml
+
+HAOS_VERSION = os.environ.get("ENERGYKIT_HAOS_VERSION", "18.2")
+IMAGE = f"haos_generic-x86-64-{HAOS_VERSION}.img.xz"
+API = f"https://api.github.com/repos/home-assistant/operating-system/releases/tags/{HAOS_VERSION}"
+TMP = Path("/tmp") / IMAGE
+PRELOAD = Path("/opt/energykit-preload/energykit")
+MOUNT = Path("/mnt/energykit-haos-data")
+LOGO = Path("/usr/share/energykit/logo.png")
+
+BG = "#07111d"
+PANEL = "#0d1927"
+PANEL2 = "#101f30"
+TEXT = "#eef4f8"
+MUTED = "#8091a3"
+LINE = "#1d3042"
+BLUE = "#087cff"
+CYAN = "#16b6d9"
+GREEN = "#2bc978"
+RED = "#ef6262"
+
+def run(*args, check=True, capture=True, timeout=None):
+    return subprocess.run(args, text=True, capture_output=capture, check=check, timeout=timeout)
+
+def disks():
+    data = json.loads(run("lsblk", "-J", "-b", "-o", "NAME,PATH,SIZE,TYPE,MODEL,TRAN,RM,MOUNTPOINTS").stdout)
+    out = []
+    for disk in data["blockdevices"]:
+        if disk.get("type") != "disk":
+            continue
+        mounts = disk.get("mountpoints") or []
+        if disk.get("rm") or any(m for m in mounts if m):
+            continue
+        out.append(disk)
+    return out
+
+def human(value):
+    return f"{value / 1024**3:.1f} GiB"
+
+class Installer(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.configure(bg=BG)
+        self.title("EnergyKit Appliance Installer")
+        self.attributes("-fullscreen", True)
+        self.bind("<Escape>", lambda e: None)
+        self.target = None
+        self.disk_var = tk.StringVar()
+        self.status_var = tk.StringVar(value="System wird geprüft …")
+        self.progress_var = tk.DoubleVar(value=0)
+        self.log_lines = []
+        self.setup_fonts()
+        self.build_shell()
+        self.show_welcome()
+        self.after(350, self.preflight_async)
+
+    def setup_fonts(self):
+        self.font_title = ("DejaVu Sans", 30, "bold")
+        self.font_h2 = ("DejaVu Sans", 17, "bold")
+        self.font_body = ("DejaVu Sans", 12)
+        self.font_small = ("DejaVu Sans", 10)
+        self.font_button = ("DejaVu Sans", 11, "bold")
+
+    def build_shell(self):
+        self.header = tk.Frame(self, bg=BG, height=100)
+        self.header.pack(fill="x", padx=52, pady=(30, 8))
+        self.header.pack_propagate(False)
+        if LOGO.exists():
+            try:
+                self.logo_img = tk.PhotoImage(file=str(LOGO))
+                scale = max(1, int(self.logo_img.width()/320))
+                if scale > 1:
+                    self.logo_img = self.logo_img.subsample(scale, scale)
+                tk.Label(self.header, image=self.logo_img, bg=BG).pack(side="left")
+            except Exception:
+                tk.Label(self.header, text="H-IT Solutions", fg=TEXT, bg=BG, font=("DejaVu Sans",22,"bold")).pack(side="left")
+        meta = tk.Frame(self.header, bg=BG)
+        meta.pack(side="right", anchor="n")
+        tk.Label(meta, text="EnergyKit Appliance", fg=TEXT, bg=BG, font=("DejaVu Sans",13,"bold")).pack(anchor="e")
+        tk.Label(meta, text="Installer v0.5.2", fg=CYAN, bg=BG, font=self.font_small).pack(anchor="e", pady=(4,0))
+
+        self.body = tk.Frame(self, bg=BG)
+        self.body.pack(fill="both", expand=True, padx=52, pady=10)
+
+        self.footer = tk.Frame(self, bg=BG, height=54)
+        self.footer.pack(fill="x", padx=52, pady=(0,24))
+        self.footer.pack_propagate(False)
+        tk.Label(self.footer, text="H-IT Solutions  •  EnergyKit Appliance", fg="#587086", bg=BG, font=self.font_small).pack(side="left", pady=16)
+        self.net_badge = tk.Label(self.footer, text="● Netzwerk wird geprüft", fg=MUTED, bg=BG, font=self.font_small)
+        self.net_badge.pack(side="right", pady=16)
+
+    def clear_body(self):
+        for w in self.body.winfo_children():
+            w.destroy()
+
+    def card(self, parent=None, padx=28, pady=24):
+        f = tk.Frame(parent or self.body, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
+        f.pack(fill="both", expand=True)
+        inner = tk.Frame(f, bg=PANEL)
+        inner.pack(fill="both", expand=True, padx=padx, pady=pady)
+        return inner
+
+    def title_block(self, parent, eyebrow, title, subtitle):
+        tk.Label(parent, text=eyebrow.upper(), fg=CYAN, bg=PANEL, font=("DejaVu Sans",9,"bold")).pack(anchor="w")
+        tk.Label(parent, text=title, fg=TEXT, bg=PANEL, font=self.font_title).pack(anchor="w", pady=(8,5))
+        tk.Label(parent, text=subtitle, fg=MUTED, bg=PANEL, font=self.font_body, justify="left").pack(anchor="w")
+
+    def button(self, parent, text, cmd, primary=True, state="normal"):
+        bg = BLUE if primary else PANEL2
+        active = "#006be0" if primary else "#15283b"
+        b = tk.Button(parent, text=text, command=cmd, state=state,
+                      fg="white" if primary else "#d8e1e9", bg=bg, activebackground=active,
+                      activeforeground="white", relief="flat", bd=0, padx=20, pady=11,
+                      cursor="hand2", font=self.font_button,
+                      disabledforeground="#67788a")
+        return b
+
+    def set_network(self, ok, text):
+        self.net_badge.config(text=("● " + text), fg=GREEN if ok else RED)
+
+    def log(self, text):
+        self.log_lines.append(text)
+        self.status_var.set(text)
+        if hasattr(self, "logbox"):
+            self.logbox.config(state="normal")
+            self.logbox.insert("end", text + "\n")
+            self.logbox.see("end")
+            self.logbox.config(state="disabled")
+        self.update_idletasks()
+
+    def show_welcome(self):
+        self.clear_body()
+        c = self.card()
+        self.title_block(c, "EnergyKit Setup", "Appliance installieren",
+                         "Offizielles Home Assistant OS wird auf die ausgewählte SSD geschrieben und EnergyKit automatisch provisioniert.")
+
+        sep = tk.Frame(c, bg=LINE, height=1)
+        sep.pack(fill="x", pady=24)
+
+        tk.Label(c, text="Installationsziel", fg=TEXT, bg=PANEL, font=self.font_h2).pack(anchor="w")
+        tk.Label(c, text="Wähle die SSD, die vollständig für die EnergyKit Appliance verwendet werden soll.", fg=MUTED, bg=PANEL, font=self.font_body).pack(anchor="w", pady=(5,14))
+
+        self.disk_frame = tk.Frame(c, bg=PANEL)
+        self.disk_frame.pack(fill="x")
+        ds = disks()
+        if not ds:
+            tk.Label(self.disk_frame, text="Keine geeignete interne Zieldisk gefunden.", fg=RED, bg=PANEL, font=self.font_body).pack(anchor="w", pady=18)
+        for d in ds:
+            row = tk.Frame(self.disk_frame, bg=PANEL2, highlightbackground=LINE, highlightthickness=1)
+            row.pack(fill="x", pady=5)
+            rb = tk.Radiobutton(row, variable=self.disk_var, value=d["path"], bg=PANEL2,
+                                activebackground=PANEL2, selectcolor=PANEL2, fg=TEXT,
+                                activeforeground=TEXT, bd=0)
+            rb.pack(side="left", padx=16, pady=17)
+            info = tk.Frame(row, bg=PANEL2)
+            info.pack(side="left", fill="x", expand=True, pady=12)
+            tk.Label(info, text=d.get("model") or "Lokale SSD", fg=TEXT, bg=PANEL2, font=("DejaVu Sans",12,"bold")).pack(anchor="w")
+            tk.Label(info, text=f'{d["path"]}  •  {human(d["size"])}', fg=MUTED, bg=PANEL2, font=self.font_small).pack(anchor="w", pady=(3,0))
+
+        warn = tk.Frame(c, bg="#211b15", highlightbackground="#58452d", highlightthickness=1)
+        warn.pack(fill="x", pady=(18, 10))
+        tk.Label(warn, text="⚠  Die ausgewählte Zieldisk wird vollständig überschrieben.", fg="#f6c980", bg="#211b15", font=self.font_body).pack(anchor="w", padx=15, pady=13)
+
+        actions = tk.Frame(c, bg=PANEL)
+        actions.pack(fill="x", pady=(12,0))
+        self.continue_btn = self.button(actions, "Weiter", self.confirm_disk, primary=True, state="disabled")
+        self.continue_btn.pack(side="right")
+        self.disk_var.trace_add("write", lambda *_: self.continue_btn.config(state="normal" if self.disk_var.get() else "disabled"))
+
+    def preflight_async(self):
+        def work():
+            try:
+                self.ensure_network()
+                self.after(0, lambda: self.set_network(True, "Online"))
+            except Exception:
+                self.after(0, lambda: self.set_network(False, "Offline"))
+        threading.Thread(target=work, daemon=True).start()
+
+    def ensure_network(self):
+        def online():
+            try:
+                urllib.request.urlopen("https://api.github.com", timeout=6).close()
+                return True
+            except Exception:
+                return False
+        if online():
+            return
+        links = json.loads(run("ip", "-j", "link").stdout)
+        for link in links:
+            name = link.get("ifname")
+            if not name or name == "lo":
+                continue
+            subprocess.run(["ip", "link", "set", name, "up"], check=False)
+            try:
+                subprocess.run(["dhclient", "-1", "-v", name], check=False, timeout=22,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except subprocess.TimeoutExpired:
+                pass
+            if online():
+                return
+        raise RuntimeError("Keine Internetverbindung. Bitte Ethernet/DHCP prüfen.")
+
+    def confirm_disk(self):
+        target = self.disk_var.get()
+        if not target:
+            return
+        self.target = target
+        self.clear_body()
+        c = self.card()
+        self.title_block(c, "Bestätigung", "Bereit zur Installation",
+                         "Bitte kontrolliere das Ziel. Nach dem Start wird die Disk ohne weitere Rückfrage überschrieben.")
+
+        detail = tk.Frame(c, bg=PANEL2, highlightbackground=LINE, highlightthickness=1)
+        detail.pack(fill="x", pady=24)
+        tk.Label(detail, text="Installationsziel", fg=MUTED, bg=PANEL2, font=self.font_small).pack(anchor="w", padx=18, pady=(15,3))
+        tk.Label(detail, text=target, fg=TEXT, bg=PANEL2, font=("DejaVu Sans",16,"bold")).pack(anchor="w", padx=18)
+        tk.Label(detail, text=f"Home Assistant OS {HAOS_VERSION} + EnergyKit", fg="#9db0c2", bg=PANEL2, font=self.font_body).pack(anchor="w", padx=18, pady=(5,16))
+
+        self.accept_var = tk.BooleanVar(False)
+        cb = tk.Checkbutton(c, text="Ich bestätige, dass alle Daten auf dieser Disk gelöscht werden dürfen.",
+                            variable=self.accept_var, bg=PANEL, fg=TEXT, activebackground=PANEL,
+                            activeforeground=TEXT, selectcolor=PANEL2, font=self.font_body)
+        cb.pack(anchor="w", pady=8)
+
+        actions = tk.Frame(c, bg=PANEL)
+        actions.pack(fill="x", pady=(28,0))
+        self.button(actions, "Zurück", self.show_welcome, primary=False).pack(side="left")
+        install_btn = self.button(actions, "EnergyKit installieren", self.start_install, primary=True, state="disabled")
+        install_btn.pack(side="right")
+        self.accept_var.trace_add("write", lambda *_: install_btn.config(state="normal" if self.accept_var.get() else "disabled"))
+
+    def show_progress(self):
+        self.clear_body()
+        c = self.card()
+        self.title_block(c, "Installation", "EnergyKit wird eingerichtet",
+                         "Der Vorgang kann einige Minuten dauern. Das System nicht ausschalten.")
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("EK.Horizontal.TProgressbar", troughcolor=PANEL2, background=CYAN,
+                        bordercolor=PANEL2, lightcolor=CYAN, darkcolor=CYAN)
+        self.progress = ttk.Progressbar(c, variable=self.progress_var, maximum=100,
+                                       style="EK.Horizontal.TProgressbar")
+        self.progress.pack(fill="x", pady=(28,10), ipady=5)
+        tk.Label(c, textvariable=self.status_var, fg=TEXT, bg=PANEL, font=("DejaVu Sans",12,"bold")).pack(anchor="w", pady=(2,12))
+
+        self.logbox = tk.Text(c, height=12, bg="#08121e", fg="#8ea0b1", insertbackground="white",
+                             relief="flat", bd=0, font=("DejaVu Sans Mono",9))
+        self.logbox.pack(fill="both", expand=True, pady=(5,0))
+        self.logbox.config(state="disabled")
+
+    def start_install(self):
+        self.show_progress()
+        threading.Thread(target=self.install_worker, daemon=True).start()
+
+    def install_worker(self):
+        try:
+            self.step(5, "Netzwerk prüfen …")
+            self.ensure_network()
+            self.after(0, lambda: self.set_network(True, "Online"))
+
+            self.step(12, f"Home Assistant OS {HAOS_VERSION} ermitteln …")
+            release, asset, expected = self.get_release()
+
+            self.download_asset(asset, expected)
+            self.step(58, "HAOS-Image verifiziert")
+
+            self.step(62, f"HAOS auf {self.target} schreiben …")
+            self.flash(self.target)
+            self.step(86, "HAOS wurde auf die SSD geschrieben")
+
+            self.step(90, "EnergyKit provisionieren …")
+            self.preseed(self.target)
+            self.step(100, "Installation abgeschlossen")
+            time.sleep(0.5)
+            self.after(0, self.show_done)
+        except Exception as exc:
+            self.after(0, lambda: self.show_error(str(exc)))
+
+    def step(self, pct, msg):
+        self.after(0, lambda: self.progress_var.set(pct))
+        self.after(0, lambda: self.log(msg))
+
+    def get_release(self):
+        req = urllib.request.Request(API, headers={"User-Agent":"EnergyKit"})
+        with urllib.request.urlopen(req, timeout=30) as response:
+            release = json.load(response)
+        asset = next(a for a in release["assets"] if a["name"] == IMAGE)
+        digest = asset.get("digest") or ""
+        expected = digest.split(":",1)[1] if digest.startswith("sha256:") else None
+        if not expected:
+            raise RuntimeError("HAOS-Release enthält keinen SHA-256-Digest.")
+        return release, asset, expected
+
+    def download_asset(self, asset, expected):
+        url = asset["browser_download_url"]
+        req = urllib.request.Request(url, headers={"User-Agent":"EnergyKit"})
+        with urllib.request.urlopen(req, timeout=60) as response, open(TMP, "wb") as fh:
+            total = int(response.headers.get("Content-Length") or 0)
+            done = 0
+            while True:
+                chunk = response.read(1024*1024)
+                if not chunk:
+                    break
+                fh.write(chunk)
+                done += len(chunk)
+                if total:
+                    pct = 14 + (done/total)*41
+                    self.after(0, lambda p=pct: self.progress_var.set(p))
+                    self.after(0, lambda d=done,t=total: self.status_var.set(f"HAOS herunterladen … {d/1024**2:.0f} / {t/1024**2:.0f} MB"))
+        actual = hashlib.sha256(TMP.read_bytes()).hexdigest()
+        if actual.lower() != expected.lower():
+            raise RuntimeError("SHA-256 des HAOS-Images stimmt nicht.")
+
+    def flash(self, target):
+        p1 = subprocess.Popen(["xz","-dc",str(TMP)], stdout=subprocess.PIPE)
+        p2 = subprocess.Popen(["dd",f"of={target}","bs=16M","conv=fsync","status=none"], stdin=p1.stdout)
+        p1.stdout.close()
+        while p2.poll() is None:
+            time.sleep(0.7)
+        rc2 = p2.wait(); rc1 = p1.wait()
+        if rc1 or rc2:
+            raise RuntimeError("HAOS konnte nicht auf die Zieldisk geschrieben werden.")
+        run("sync", capture=False)
+        run("partprobe", target, check=False)
+        run("udevadm","settle",check=False)
+        time.sleep(2)
+
+    def find_data_partition(self, target):
+        label = Path("/dev/disk/by-label/hassos-data")
+        if label.exists():
+            return str(label.resolve())
+        info = json.loads(run("lsblk","-J","-o","PATH,TYPE,LABEL",target).stdout)
+        stack = list(info.get("blockdevices",[]))
+        while stack:
+            node=stack.pop(0)
+            if node.get("type")=="part" and node.get("label")=="hassos-data":
+                return node["path"]
+            stack.extend(node.get("children") or [])
+        raise RuntimeError("hassos-data Partition wurde nicht gefunden.")
+
+    def preseed(self, target):
+        if not PRELOAD.joinpath("config.yaml").exists():
+            raise RuntimeError("EnergyKit Preload fehlt im Installer.")
+        data_part = self.find_data_partition(target)
+        MOUNT.mkdir(parents=True, exist_ok=True)
+        run("mount",data_part,str(MOUNT),capture=False)
+        try:
+            supervisor=MOUNT/"supervisor"
+            local_app=supervisor/"apps"/"local"/"energykit"
+            local_app.mkdir(parents=True,exist_ok=True)
+            app_data=supervisor/"apps"/"data"/"local_energykit"
+            app_data.mkdir(parents=True,exist_ok=True)
+            os.chmod(app_data,0o755)
+            for src in PRELOAD.iterdir():
+                dst=local_app/src.name
+                if src.is_dir():
+                    if dst.exists(): shutil.rmtree(dst)
+                    shutil.copytree(src,dst)
+                else:
+                    shutil.copy2(src,dst)
+            config=yaml.safe_load((local_app/"config.yaml").read_text())
+            if not config.get("image") or "__IMAGE_BASE__" in config["image"]:
+                raise RuntimeError("EnergyKit Image-URL wurde nicht gerendert.")
+            slug=config["slug"]; installed_slug=f"local_{slug}"
+            system_cfg=dict(config); system_cfg["repository"]="local"; system_cfg["translations"]={}
+            resolved_image=config["image"].replace("{arch}","amd64")
+            supervisor_token=secrets.token_hex(64)
+            system_cfg.setdefault("environment", {})["ENERGYKIT_SUPERVISOR_TOKEN"]=supervisor_token
+            user_cfg={
+                "version":str(config["version"]),"image":resolved_image,
+                "uuid":secrets.token_hex(16),"access_token":supervisor_token,
+                "ingress_token":secrets.token_urlsafe(32),"options":dict(config.get("options") or {}),
+                "auto_update":False,"boot":"auto","protected":True,"ingress_panel":True,
+                "watchdog":False,"system_managed":False,
+            }
+            apps_file=supervisor/"apps.json"
+            data={"user":{},"system":{}}
+            if apps_file.exists():
+                try: data=json.loads(apps_file.read_text())
+                except Exception: pass
+            data.setdefault("user",{})[installed_slug]=user_cfg
+            data.setdefault("system",{})[installed_slug]=system_cfg
+            apps_file.parent.mkdir(parents=True,exist_ok=True)
+            apps_file.write_text(json.dumps(data,indent=2)+"\n")
+            os.chmod(apps_file,0o600)
+            (supervisor/"energykit-preseed.json").write_text(json.dumps({
+                "energykit_version":config["version"],"haos_version":HAOS_VERSION,
+                "image":resolved_image,"installed_slug":installed_slug,"mode":"local-app-preseed",
+            },indent=2)+"\n")
+        finally:
+            run("sync",capture=False)
+            run("umount",str(MOUNT),capture=False)
+
+    def show_done(self):
+        self.clear_body()
+        c=self.card()
+        self.title_block(c,"Fertig","EnergyKit Appliance ist installiert",
+                         "Home Assistant OS und EnergyKit wurden erfolgreich vorbereitet.")
+        success=tk.Frame(c,bg="#0d251d",highlightbackground="#1f684a",highlightthickness=1)
+        success.pack(fill="x",pady=26)
+        tk.Label(success,text="✓  Installation erfolgreich",fg=GREEN,bg="#0d251d",font=("DejaVu Sans",15,"bold")).pack(anchor="w",padx=18,pady=(18,4))
+        tk.Label(success,text="Installationsmedium entfernen und das System neu starten.",fg="#a6bdb0",bg="#0d251d",font=self.font_body).pack(anchor="w",padx=18,pady=(0,18))
+        actions=tk.Frame(c,bg=PANEL); actions.pack(fill="x",pady=(14,0))
+        self.button(actions,"Ausschalten",lambda: subprocess.Popen(["systemctl","poweroff"]),primary=False).pack(side="left")
+        self.button(actions,"Neu starten",lambda: subprocess.Popen(["systemctl","reboot"]),primary=True).pack(side="right")
+
+    def show_error(self, message):
+        self.clear_body()
+        c=self.card()
+        self.title_block(c,"Fehler","Installation konnte nicht abgeschlossen werden",
+                         "Der Installer hat den Vorgang gestoppt. Die technische Meldung steht unten.")
+        err=tk.Frame(c,bg="#2a1518",highlightbackground="#6e3035",highlightthickness=1)
+        err.pack(fill="x",pady=24)
+        tk.Label(err,text=message,fg="#ff9da3",bg="#2a1518",font=self.font_body,wraplength=1000,justify="left").pack(anchor="w",padx=18,pady=18)
+        actions=tk.Frame(c,bg=PANEL);actions.pack(fill="x")
+        self.button(actions,"Zurück zur Laufwerksauswahl",self.show_welcome,primary=False).pack(side="left")
+        self.button(actions,"Neu versuchen",self.start_install,primary=True).pack(side="right")
+
+if __name__ == "__main__":
+    try:
+        subprocess.run(["setxkbmap","de"],check=False,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    Installer().mainloop()

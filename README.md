@@ -153,3 +153,26 @@ v0.4.1 fügt außerdem nach dem ISO-Build einen formalen Artifact-Check inklusiv
 - Installer setzt Execute-Bit explizit
 - deutsches Konsolenlayout im Installer
 - Netzwerk-/DHCP-Preflight vor HAOS-Download
+
+
+## v0.5.1 – GRUB Theme + Graphical Appliance Installer
+
+- eigenes EnergyKit GRUB Theme für UEFI/GRUB mit H-IT Branding
+- klare Boot-Einträge: EnergyKit installieren, Recovery, Systeminformationen, Ausschalten
+- lokaler grafischer Tk/X11-Installer statt tty-Onepager
+- gleiche dunkle Appliance-Designsprache wie EnergyKit in Home Assistant
+- Laufwerkskarten, Löschbestätigung, Netzwerkstatus, Download-Fortschritt, Fehlerseite und Abschlussseite
+- HAOS-/Preseed-Logik unverändert; kein Plymouth und kein geänderter HAOS-Bootpfad
+
+
+## v0.5.2 – API/Auth Fixes
+
+- Preseed hinterlegt den Supervisor-Token zusätzlich als `ENERGYKIT_SUPERVISOR_TOKEN`
+- EnergyKit nutzt diesen Token als Fallback, falls `SUPERVISOR_TOKEN` beim ersten Start fehlt
+- `all_addon_configs` auf `all_app_configs` umgestellt
+- VisionOS wird aus dem aktuellen GitHub Release geladen
+- Sigenergy, Deye und EnergyKit Bridge markieren einen notwendigen HA-Neustart
+- Config Flows werden bis zum erforderlichen Neustart blockiert
+- Restart-Endpunkt wartet auf die Rückkehr von Home Assistant Core
+- Diagnose zeigt jetzt die Token-Quelle
+- Dashboard prüft Mushroom und ausstehende Neustarts

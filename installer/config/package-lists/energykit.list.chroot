@@ -12,3 +12,10 @@ pciutils
 smartmontools
 kbd
 isc-dhcp-client
+python3-tk
+xserver-xorg-core
+xserver-xorg-video-all
+xserver-xorg-input-all
+xinit
+x11-xserver-utils
+fonts-dejavu-core
