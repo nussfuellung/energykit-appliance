@@ -176,3 +176,15 @@ v0.4.1 fügt außerdem nach dem ISO-Build einen formalen Artifact-Check inklusiv
 - Restart-Endpunkt wartet auf die Rückkehr von Home Assistant Core
 - Diagnose zeigt jetzt die Token-Quelle
 - Dashboard prüft Mushroom und ausstehende Neustarts
+
+
+## v0.5.3 – UI / UEFI Boot Fix
+
+- grafischer Installer responsiver und kompakter
+- kleineres H-IT-Logo
+- erste Zieldisk wird automatisch ausgewählt
+- komplette Laufwerkskarte klickbar
+- Enter/↑/↓ als Tastatur-Fallback
+- expliziter libinput/QXL/SPICE-Input-Stack für virt-manager
+- GRUB-Theme jetzt für `grub-pc` **und** `grub-efi`
+- Binary-Hook injiziert Theme auch in von live-build generierte UEFI-GRUB-Konfigurationen

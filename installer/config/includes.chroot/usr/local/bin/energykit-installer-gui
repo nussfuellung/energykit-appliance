@@ -20,7 +20,7 @@ API = f"https://api.github.com/repos/home-assistant/operating-system/releases/ta
 TMP = Path("/tmp") / IMAGE
 PRELOAD = Path("/opt/energykit-preload/energykit")
 MOUNT = Path("/mnt/energykit-haos-data")
-LOGO = Path("/usr/share/energykit/logo.png")
+LOGO = Path("/usr/share/energykit/logo-gui.png")
 
 BG = "#07111d"
 PANEL = "#0d1927"
@@ -54,10 +54,15 @@ def human(value):
 class Installer(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.configure(bg=BG)
+        self.configure(bg=BG, cursor="arrow")
         self.title("EnergyKit Appliance Installer")
         self.attributes("-fullscreen", True)
         self.bind("<Escape>", lambda e: None)
+        self.bind("<Return>", self._enter_key)
+        self.bind("<KP_Enter>", self._enter_key)
+        self.bind("<Up>", self._disk_up)
+        self.bind("<Down>", self._disk_down)
+        self.bind("<F5>", lambda e: self.show_welcome())
         self.target = None
         self.disk_var = tk.StringVar()
         self.status_var = tk.StringVar(value="System wird geprüft …")
@@ -68,38 +73,63 @@ class Installer(tk.Tk):
         self.show_welcome()
         self.after(350, self.preflight_async)
 
+    def _enter_key(self, event=None):
+        # Keyboard fallback for environments where pointer integration is odd.
+        if hasattr(self, "primary_action") and self.primary_action:
+            try:
+                self.primary_action.invoke()
+            except Exception:
+                pass
+
+    def _disk_up(self, event=None):
+        self._cycle_disk(-1)
+
+    def _disk_down(self, event=None):
+        self._cycle_disk(1)
+
+    def _cycle_disk(self, delta):
+        if not hasattr(self, "_disk_paths") or not self._disk_paths:
+            return
+        cur = self.disk_var.get()
+        try:
+            idx = self._disk_paths.index(cur)
+        except ValueError:
+            idx = 0
+        idx = (idx + delta) % len(self._disk_paths)
+        self.disk_var.set(self._disk_paths[idx])
+
     def setup_fonts(self):
-        self.font_title = ("DejaVu Sans", 30, "bold")
-        self.font_h2 = ("DejaVu Sans", 17, "bold")
-        self.font_body = ("DejaVu Sans", 12)
-        self.font_small = ("DejaVu Sans", 10)
-        self.font_button = ("DejaVu Sans", 11, "bold")
+        self.font_title = ("DejaVu Sans", 26, "bold")
+        self.font_h2 = ("DejaVu Sans", 15, "bold")
+        self.font_body = ("DejaVu Sans", 11)
+        self.font_small = ("DejaVu Sans", 9)
+        self.font_button = ("DejaVu Sans", 10, "bold")
 
     def build_shell(self):
-        self.header = tk.Frame(self, bg=BG, height=100)
-        self.header.pack(fill="x", padx=52, pady=(30, 8))
+        sw = self.winfo_screenwidth()
+        pad = max(28, min(52, sw // 28))
+        self._pad = pad
+        self.header = tk.Frame(self, bg=BG, height=78)
+        self.header.pack(fill="x", padx=pad, pady=(18, 6))
         self.header.pack_propagate(False)
         if LOGO.exists():
             try:
                 self.logo_img = tk.PhotoImage(file=str(LOGO))
-                scale = max(1, int(self.logo_img.width()/320))
-                if scale > 1:
-                    self.logo_img = self.logo_img.subsample(scale, scale)
-                tk.Label(self.header, image=self.logo_img, bg=BG).pack(side="left")
+                tk.Label(self.header, image=self.logo_img, bg=BG, bd=0).pack(side="left", anchor="w")
             except Exception:
-                tk.Label(self.header, text="H-IT Solutions", fg=TEXT, bg=BG, font=("DejaVu Sans",22,"bold")).pack(side="left")
+                tk.Label(self.header, text="H-IT Solutions", fg=TEXT, bg=BG, font=("DejaVu Sans",18,"bold")).pack(side="left")
         meta = tk.Frame(self.header, bg=BG)
         meta.pack(side="right", anchor="n")
         tk.Label(meta, text="EnergyKit Appliance", fg=TEXT, bg=BG, font=("DejaVu Sans",13,"bold")).pack(anchor="e")
-        tk.Label(meta, text="Installer v0.5.2", fg=CYAN, bg=BG, font=self.font_small).pack(anchor="e", pady=(4,0))
+        tk.Label(meta, text="Installer v0.5.3", fg=CYAN, bg=BG, font=self.font_small).pack(anchor="e", pady=(4,0))
 
         self.body = tk.Frame(self, bg=BG)
-        self.body.pack(fill="both", expand=True, padx=52, pady=10)
+        self.body.pack(fill="both", expand=True, padx=self._pad, pady=8)
 
         self.footer = tk.Frame(self, bg=BG, height=54)
-        self.footer.pack(fill="x", padx=52, pady=(0,24))
+        self.footer.pack(fill="x", padx=self._pad, pady=(0,14))
         self.footer.pack_propagate(False)
-        tk.Label(self.footer, text="H-IT Solutions  •  EnergyKit Appliance", fg="#587086", bg=BG, font=self.font_small).pack(side="left", pady=16)
+        tk.Label(self.footer, text="↑↓ Auswahl  •  Enter Weiter  •  Maus unterstützt", fg="#587086", bg=BG, font=self.font_small).pack(side="left", pady=16)
         self.net_badge = tk.Label(self.footer, text="● Netzwerk wird geprüft", fg=MUTED, bg=BG, font=self.font_small)
         self.net_badge.pack(side="right", pady=16)
 
@@ -107,9 +137,13 @@ class Installer(tk.Tk):
         for w in self.body.winfo_children():
             w.destroy()
 
-    def card(self, parent=None, padx=28, pady=24):
-        f = tk.Frame(parent or self.body, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
-        f.pack(fill="both", expand=True)
+    def card(self, parent=None, padx=26, pady=22):
+        host = parent or self.body
+        outer = tk.Frame(host, bg=BG)
+        outer.pack(fill="both", expand=True)
+        f = tk.Frame(outer, bg=PANEL, highlightbackground=LINE, highlightthickness=1, width=1080)
+        f.pack(fill="both", expand=True, padx=max(0, self.winfo_screenwidth()//18), pady=4)
+        f.pack_propagate(False)
         inner = tk.Frame(f, bg=PANEL)
         inner.pack(fill="both", expand=True, padx=padx, pady=pady)
         return inner
@@ -157,19 +191,26 @@ class Installer(tk.Tk):
         self.disk_frame = tk.Frame(c, bg=PANEL)
         self.disk_frame.pack(fill="x")
         ds = disks()
+        self._disk_paths = [d["path"] for d in ds]
         if not ds:
             tk.Label(self.disk_frame, text="Keine geeignete interne Zieldisk gefunden.", fg=RED, bg=PANEL, font=self.font_body).pack(anchor="w", pady=18)
         for d in ds:
-            row = tk.Frame(self.disk_frame, bg=PANEL2, highlightbackground=LINE, highlightthickness=1)
+            row = tk.Frame(self.disk_frame, bg=PANEL2, highlightbackground=LINE, highlightthickness=1, cursor="hand2")
             row.pack(fill="x", pady=5)
             rb = tk.Radiobutton(row, variable=self.disk_var, value=d["path"], bg=PANEL2,
                                 activebackground=PANEL2, selectcolor=PANEL2, fg=TEXT,
-                                activeforeground=TEXT, bd=0)
-            rb.pack(side="left", padx=16, pady=17)
-            info = tk.Frame(row, bg=PANEL2)
-            info.pack(side="left", fill="x", expand=True, pady=12)
-            tk.Label(info, text=d.get("model") or "Lokale SSD", fg=TEXT, bg=PANEL2, font=("DejaVu Sans",12,"bold")).pack(anchor="w")
-            tk.Label(info, text=f'{d["path"]}  •  {human(d["size"])}', fg=MUTED, bg=PANEL2, font=self.font_small).pack(anchor="w", pady=(3,0))
+                                activeforeground=TEXT, bd=0, cursor="hand2")
+            rb.pack(side="left", padx=16, pady=15)
+            info = tk.Frame(row, bg=PANEL2, cursor="hand2")
+            info.pack(side="left", fill="x", expand=True, pady=10)
+            title = tk.Label(info, text=d.get("model") or "Lokale SSD", fg=TEXT, bg=PANEL2, font=("DejaVu Sans",11,"bold"), cursor="hand2")
+            title.pack(anchor="w")
+            sub = tk.Label(info, text=f'{d["path"]}  •  {human(d["size"])}', fg=MUTED, bg=PANEL2, font=self.font_small, cursor="hand2")
+            sub.pack(anchor="w", pady=(3,0))
+            for widget in (row, info, title, sub):
+                widget.bind("<Button-1>", lambda e, p=d["path"]: self.disk_var.set(p))
+        if ds and not self.disk_var.get():
+            self.disk_var.set(ds[0]["path"])
 
         warn = tk.Frame(c, bg="#211b15", highlightbackground="#58452d", highlightthickness=1)
         warn.pack(fill="x", pady=(18, 10))
@@ -177,8 +218,10 @@ class Installer(tk.Tk):
 
         actions = tk.Frame(c, bg=PANEL)
         actions.pack(fill="x", pady=(12,0))
-        self.continue_btn = self.button(actions, "Weiter", self.confirm_disk, primary=True, state="disabled")
+        self.continue_btn = self.button(actions, "Weiter", self.confirm_disk, primary=True,
+                                        state="normal" if self.disk_var.get() else "disabled")
         self.continue_btn.pack(side="right")
+        self.primary_action = self.continue_btn
         self.disk_var.trace_add("write", lambda *_: self.continue_btn.config(state="normal" if self.disk_var.get() else "disabled"))
 
     def preflight_async(self):

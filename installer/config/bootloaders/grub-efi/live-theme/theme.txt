@@ -1,0 +1,39 @@
+title-text: ""
+desktop-image: "../splash.png"
+desktop-color: "#06101c"
+
+terminal-left: "0"
+terminal-top: "0"
+terminal-width: "100%"
+terminal-height: "100%"
+terminal-border: "0"
+
++ boot_menu {
+  left = 6%
+  top = 49%
+  width = 48%
+  height = 33%
+  item_height = 54
+  item_padding = 16
+  item_spacing = 3
+  item_color = "#b7c3d0"
+  selected_item_color = "#ffffff"
+  selected_item_pixmap_style = "selected_*.png"
+  scrollbar = false
+}
+
++ label {
+  text = "INSTALLATIONSMEDIUM"
+  left = 6%
+  top = 46%
+  color = "#60778e"
+  font = "DejaVu Sans Bold 14"
+}
+
++ label {
+  text = "H-IT Solutions"
+  left = 83%
+  top = 94%
+  color = "#6f8294"
+  font = "DejaVu Sans Bold 14"
+}

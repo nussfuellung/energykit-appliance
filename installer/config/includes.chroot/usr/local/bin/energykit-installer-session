@@ -4,4 +4,7 @@ export HOME=/root
 export XDG_RUNTIME_DIR=/tmp/energykit-xdg
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
-exec /usr/bin/xinit /usr/local/bin/energykit-installer-gui -- /usr/bin/Xorg :0 vt1 -keeptty -nolisten tcp
+if command -v spice-vdagent >/dev/null 2>&1; then
+  spice-vdagent >/tmp/spice-vdagent.log 2>&1 &
+fi
+exec /usr/bin/xinit /usr/local/bin/energykit-installer-gui -- /usr/bin/Xorg :0 vt1 -keeptty -nolisten tcp -dpi 96
