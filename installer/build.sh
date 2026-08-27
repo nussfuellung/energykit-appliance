@@ -4,37 +4,85 @@ set -Eeuo pipefail
 cd "$(dirname "$0")"
 
 command -v lb >/dev/null || {
-  echo "live-build fehlt. Debian/Ubuntu: sudo apt install live-build"
+  echo "FEHLER: live-build fehlt."
+  echo "Debian/Ubuntu: sudo apt install live-build"
   exit 1
 }
 
-rm -rf .build-cache binary* chroot* cache local .build
+echo "======================================"
+echo " EnergyKit ISO Build"
+echo "======================================"
+echo
 
-echo "== live-build konfigurieren =="
+echo "[1/4] Alten Build bereinigen..."
+rm -rf \
+  .build-cache \
+  binary* \
+  chroot* \
+  cache \
+  local \
+  .build
+
+echo
+echo "[2/4] live-build konfigurieren..."
 bash ./auto/config
 
 echo
 echo "== Prüfe Debian Security Quellen =="
+
 grep -R "bookworm/updates" -n . || true
 grep -R "bookworm-security" -n . || true
 
 echo
-echo "== ISO bauen =="
+echo "[3/4] ISO bauen..."
 lb build
 
-ISO="$(find . -maxdepth 1 -name 'live-image-amd64.hybrid.iso' -print -quit)"
+echo
+echo "[4/4] ISO-Artefakt vorbereiten..."
+
+ISO="$(find . \
+  -maxdepth 1 \
+  -type f \
+  -name 'live-image-amd64.hybrid.iso' \
+  -print \
+  -quit)"
 
 if [[ -z "$ISO" ]]; then
-  echo "FEHLER: live-build wurde beendet, aber kein ISO gefunden."
+  echo "FEHLER:"
+  echo "live-build wurde beendet, aber"
+  echo "live-image-amd64.hybrid.iso wurde nicht gefunden."
   exit 1
 fi
 
-mv "$ISO" "../energykit-installer-amd64.iso"
+OUTPUT_ISO="../energykit-installer-amd64.iso"
+OUTPUT_SHA="../energykit-installer-amd64.iso.sha256"
 
-sha256sum ../energykit-installer-amd64.iso \
-  > ../energykit-installer-amd64.iso.sha256
+rm -f "$OUTPUT_ISO" "$OUTPUT_SHA"
+
+mv "$ISO" "$OUTPUT_ISO"
+
+cd ..
 
 echo
-echo "Fertig:"
-ls -lh ../energykit-installer-amd64.iso
-cat ../energykit-installer-amd64.iso.sha256
+echo "Erzeuge SHA-256..."
+
+sha256sum energykit-installer-amd64.iso \
+  > energykit-installer-amd64.iso.sha256
+
+echo
+echo "Prüfe SHA-256 direkt..."
+
+sha256sum -c energykit-installer-amd64.iso.sha256
+
+echo
+echo "======================================"
+echo " EnergyKit ISO erfolgreich erstellt"
+echo "======================================"
+echo
+
+ls -lh energykit-installer-amd64.iso
+ls -lh energykit-installer-amd64.iso.sha256
+
+echo
+echo "SHA-256:"
+cat energykit-installer-amd64.iso.sha256
