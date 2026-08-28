@@ -38,6 +38,34 @@ echo "[3/4] ISO bauen..."
 lb build
 
 echo
+echo "== EnergyKit GRUB Validierung =="
+if [[ -f binary/boot/grub/grub.cfg ]]; then
+  echo "--- binary/boot/grub/grub.cfg ---"
+  sed -n '1,120p' binary/boot/grub/grub.cfg
+else
+  echo "WARNUNG: binary/boot/grub/grub.cfg nicht im Arbeitsbaum vorhanden."
+fi
+
+if [[ -f binary/boot/grub/config.cfg ]]; then
+  echo "--- binary/boot/grub/config.cfg ---"
+  sed -n '1,160p' binary/boot/grub/config.cfg
+
+  if grep -qE '@KERNEL_LIVE@|@INITRD_LIVE@|@APPEND_LIVE@|(^|[[:space:]])KERNEL_LIVE([[:space:]]|$)|(^|[[:space:]])INITRD_LIVE([[:space:]]|$)' binary/boot/grub/config.cfg; then
+    echo "FEHLER: Nicht ersetzte GRUB-Platzhalter in config.cfg."
+    exit 1
+  fi
+else
+  echo "WARNUNG: binary/boot/grub/config.cfg nicht im Arbeitsbaum vorhanden."
+fi
+
+if [[ -f binary/boot/grub/live-theme/theme.txt ]]; then
+  echo "GRUB Theme vorhanden: binary/boot/grub/live-theme/theme.txt"
+else
+  echo "WARNUNG: EnergyKit GRUB Theme fehlt im Arbeitsbaum."
+fi
+
+
+echo
 echo "[4/4] ISO-Artefakt vorbereiten..."
 
 ISO="$(find . \

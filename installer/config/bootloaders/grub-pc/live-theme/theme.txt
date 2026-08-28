@@ -1,5 +1,6 @@
 title-text: ""
-desktop-image: "../splash.png"
+desktop-image: "background.png"
+desktop-image-scale-method: "stretch"
 desktop-color: "#06101c"
 
 terminal-left: "0"
@@ -9,31 +10,40 @@ terminal-height: "100%"
 terminal-border: "0"
 
 + boot_menu {
-  left = 6%
-  top = 47%
-  width = 48%
-  height = 33%
-  item_height = 54
-  item_padding = 16
-  item_spacing = 3
-  item_color = "#b7c3d0"
+  left = 7%
+  top = 49%
+  width = 46%
+  height = 32%
+
+  item_font = "DejaVu Sans Bold 16"
+  selected_item_font = "DejaVu Sans Bold 16"
+
+  item_color = "#aebdca"
   selected_item_color = "#ffffff"
+
+  item_height = 54
+  item_padding = 12
+  item_spacing = 4
+
   selected_item_pixmap_style = "selected_*.png"
   scrollbar = false
 }
 
 + label {
-  text = "INSTALLATIONSMEDIUM"
-  left = 6%
-  top = 46%
-  color = "#60778e"
-  font = "DejaVu Sans Bold 14"
+  left = 7%
+  top = 44%
+  width = 46%
+  text = "ENERGYKIT APPLIANCE"
+  color = "#16b6d9"
+  font = "DejaVu Sans Bold 16"
 }
 
 + label {
-  text = "H-IT Solutions"
-  left = 83%
-  top = 94%
+  left = 7%
+  top = 84%
+  width = 46%
+  id = "__timeout__"
+  text = "Start in %d Sekunden"
   color = "#6f8294"
-  font = "DejaVu Sans Bold 14"
+  font = "DejaVu Sans Bold 16"
 }

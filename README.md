@@ -228,3 +228,20 @@ sichtbar sind.
 - `--bootloaders "grub-pc grub-efi"`
 - fragile Binary-Hooks entfernt
 - GRUB-Buildprüfung nur noch diagnostisch, keine False-Positive-Abbrüche
+
+
+## v0.5.6 – Confirmation + GRUB root-cause fix
+
+### Installer
+- native Tk-Checkbox entfernt
+- eigene sichtbare `[ ]` / `[✓]` Bestätigungszeile
+- `EnergyKit installieren` ist permanent sichtbar und wird erst nach Bestätigung aktiv
+- Leertaste toggelt die Bestätigung, Enter startet danach die Installation
+
+### GRUB
+- getrennten `grub-efi` Theme-Baum entfernt
+- live-build verwendet `config/bootloaders/grub-pc` für die gemeinsame GRUB-Konfiguration von BIOS und UEFI
+- `gfxmenu` und `png` werden explizit geladen
+- Hintergrund liegt direkt im Theme-Verzeichnis
+- falsche `@KERNEL_LIVE@` Platzhalter durch die von live-build tatsächlich ersetzten Tokens ersetzt
+- Build prüft die bereits generierte `binary/boot/grub/config.cfg` auf nicht ersetzte Platzhalter
