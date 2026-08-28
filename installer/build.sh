@@ -43,12 +43,13 @@ for SCRIPT in \
   config/includes.chroot/usr/local/bin/energykit-installer \
   config/includes.chroot/usr/local/bin/energykit-installer-gui
 do
-  if grep -qE '"access_token"|ENERGYKIT_SUPERVISOR_TOKEN' "$SCRIPT"; then
-    echo "FEHLER: $SCRIPT erzeugt weiterhin eigene Supervisor-Credentials."
+  if grep -qE '"access_token"|ENERGYKIT_SUPERVISOR_TOKEN|apps_file[[:space:]]*=' "$SCRIPT"; then
+    echo "FEHLER: $SCRIPT manipuliert weiterhin Supervisor-Credentials oder apps.json."
     exit 1
   fi
 done
-echo "Preseed-Credentials: Supervisor-owned ✓"
+grep -q 'energykit_bootstrap' config/includes.chroot/usr/local/bin/energykit-installer || { echo "FEHLER: First-Boot Bootstrap fehlt"; exit 1; }
+echo "Preseed: source-only + Core/Supervisor Bootstrap ✓"
 
 echo
 echo "== EnergyKit GRUB Validierung =="

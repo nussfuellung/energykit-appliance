@@ -20,7 +20,7 @@ import websockets
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
-APP_VERSION = "0.5.8"
+APP_VERSION = "0.5.9"
 SUPERVISOR = "http://supervisor"
 TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 DATA = Path("/config")
@@ -42,8 +42,8 @@ DEFAULT_STATE: dict[str, Any] = {
     "components": {},
     "energy": {"vendor": None, "host": None, "port": 502, "configured": False},
     "mapping": {},
-    "wallbox": {"vendor": "none", "host": "", "entity": "", "max_current": 16, "phases": 3},
-    "heatpump": {"mode": "none", "switch": "", "power_threshold": 2500, "off_threshold": 800, "delay_min": 5},
+    "wallbox": {"vendor": "none", "host": "", "entity": "", "device_id": "", "modbus_id": 1, "max_current": 16, "phases": 3},
+    "heatpump": {"mode": "none", "vendor": "", "host": "", "entity": "", "switch": "", "device_id": "", "power_threshold": 2500, "off_threshold": 800, "delay_min": 5},
     "evcc": {"installed": False, "slug": None, "configured": False, "config_path": None},
     "dashboard": {"installed": False},
     "last_backup": None,
@@ -397,6 +397,97 @@ async def scan_live() -> list[dict[str, Any]]:
     return sorted(results, key=lambda d: tuple(map(int, d["host"].split("."))))
 
 
+def _consumer_match(kind: str, text: str) -> int:
+    s = text.lower()
+    if kind == "wallbox":
+        keys = {
+            "sigenergy": 9, "sigen": 9, "ac charger": 10, "ev charger": 9, "wallbox": 9,
+            "charger": 6, "go-e": 9, "go e": 8, "easee": 9, "zaptec": 9, "alfen": 9,
+            "openwb": 9, "wall connector": 8, "charging": 4, "laden": 4,
+        }
+    else:
+        keys = {
+            "wärmepumpe": 10, "waermepumpe": 10, "heat pump": 10, "heatpump": 10,
+            "vaillant": 8, "arotherm": 9, "viessmann": 8, "stiebel": 8, "nibe": 8,
+            "wolf": 7, "panasonic": 7, "daikin": 7, "buderus": 7, "bosch": 6,
+            "therma": 7, "ecodan": 8, "alpha innotec": 8, "samsung ehs": 8, "sg ready": 7,
+        }
+    return max((score for key, score in keys.items() if key in s), default=0)
+
+
+async def discover_ha_consumers(kind: str) -> list[dict[str, Any]]:
+    """Find wallboxes/heat pumps already known by Home Assistant.
+
+    Device and entity registries give us manufacturer/model context, while the
+    current states tell us which control entities are actually available.
+    """
+    if kind not in {"wallbox", "heatpump"}:
+        raise HTTPException(400, "Unbekannter Gerätetyp")
+    try:
+        devices, entities = await core_ws([
+            {"type": "config/device_registry/list"},
+            {"type": "config/entity_registry/list"},
+        ])
+        states = await all_states()
+    except Exception:
+        return []
+
+    devmap = {d.get("id"): d for d in (devices or [])}
+    statemap = {s.get("entity_id"): s for s in states}
+    grouped: dict[str, dict[str, Any]] = {}
+
+    for ent in entities or []:
+        eid = ent.get("entity_id") or ""
+        dev = devmap.get(ent.get("device_id")) or {}
+        st = statemap.get(eid) or {}
+        attrs = st.get("attributes") or {}
+        text = " ".join(str(x or "") for x in [
+            eid, ent.get("original_name"), ent.get("name"), attrs.get("friendly_name"),
+            dev.get("name"), dev.get("name_by_user"), dev.get("manufacturer"), dev.get("model"),
+        ])
+        score = _consumer_match(kind, text)
+        if not score:
+            continue
+        did = ent.get("device_id") or eid
+        item = grouped.setdefault(did, {
+            "source": "homeassistant", "kind": kind, "device_id": ent.get("device_id") or "",
+            "vendor": dev.get("manufacturer") or ("Sigenergy" if "sigen" in text.lower() else "Home Assistant"),
+            "model": dev.get("model") or dev.get("name_by_user") or dev.get("name") or attrs.get("friendly_name") or eid,
+            "host": "", "entities": [], "score": 0,
+        })
+        item["score"] = max(item["score"], score)
+        item["entities"].append(eid)
+
+    out=[]
+    for item in grouped.values():
+        candidates=item["entities"]
+        preferred=[]
+        if kind == "wallbox":
+            for eid in candidates:
+                low=eid.lower()
+                domain=eid.split('.',1)[0]
+                p=(8 if domain in {"switch","button","number","select"} else 0) + _consumer_match(kind, low)
+                if any(k in low for k in ("start_charging","stop_charging","charging","charger","wallbox")): p += 5
+                preferred.append((p,eid))
+        else:
+            for eid in candidates:
+                low=eid.lower(); domain=eid.split('.',1)[0]
+                p=(8 if domain in {"switch","climate","number","select"} else 0) + _consumer_match(kind, low)
+                if any(k in low for k in ("sg_ready","sgready","heat","waerme","warm")): p += 5
+                preferred.append((p,eid))
+        preferred.sort(reverse=True)
+        item["entity"] = preferred[0][1] if preferred else ""
+        item["entities"] = [x[1] for x in preferred[:12]]
+        # Sigenergy AC charger deserves a first-class label.
+        blob=(str(item.get("vendor"))+" "+str(item.get("model"))+" "+" ".join(item["entities"])).lower()
+        if kind == "wallbox" and ("sigen" in blob or "sigenergy" in blob) and ("charger" in blob or "charging" in blob):
+            item["vendor"]="Sigenergy"
+            item["model"] = item.get("model") or "Sigen AC Charger"
+            item["sigenergy_ac_charger"] = True
+        out.append(item)
+    return sorted(out, key=lambda x: (-int(x.get("score",0)), str(x.get("model",""))))
+
+
 async def create_backup(name: str):
     data = await sup("POST", "/backups/new/partial", json={
         "name": name,
@@ -628,8 +719,22 @@ async function submitFlow(id,btn){const box=byId('flow'),names=JSON.parse(box.da
 async function loadEntities(){const d=await api('api/entities');const opts='<option value="">– auswählen –</option>'+d.entities.map(e=>`<option value="${esc(e.entity_id)}">${esc(e.entity_id)}${e.name?' · '+esc(e.name):''}</option>`).join('');['pv','house','grid','battery_power','battery_soc'].forEach(k=>byId('map_'+k).innerHTML=opts)}
 async function autoMap(btn){await action(btn,async()=>{await loadEntities();const d=await api('api/mapping/auto');Object.entries(d.mapping).forEach(([k,v])=>{if(byId('map_'+k))byId('map_'+k).value=v.entity_id||''});byId('mapHint').textContent=Object.values(d.mapping).every(v=>v.confident)?'Automatische Zuordnung ist eindeutig.':'Einige Werte sind nicht eindeutig. Bitte kontrollieren.';return d},'Messwerte analysiert')}
 async function saveMapping(btn){const data={};['pv','house','grid','battery_power','battery_soc'].forEach(k=>data[k]=byId('map_'+k).value);await action(btn,()=>api('api/mapping',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}),'Mapping gespeichert')}
-async function saveWallbox(btn){await action(btn,()=>api('api/wallbox',{method:'POST',body:fd({vendor:byId('wb_vendor').value,host:byId('wb_host').value,entity:byId('wb_entity').value,max_current:byId('wb_current').value,phases:byId('wb_phases').value})}),'Wallbox gespeichert')}
-async function saveHeatpump(btn){await action(btn,()=>api('api/heatpump',{method:'POST',body:fd({mode:byId('hp_mode').value,switch_entity:byId('hp_switch').value,power_threshold:byId('hp_on').value,off_threshold:byId('hp_off').value,delay_min:byId('hp_delay').value})}),'Wärmepumpe gespeichert')}
+async function discoverConsumer(kind,btn){
+ const box=byId(kind==='wallbox'?'wb_devices':'hp_devices');box.innerHTML='<div class="callout">Suche Home Assistant und lokales Netzwerk …</div>';
+ const d=await action(btn,()=>api(`api/discover/consumers?kind=${kind}`),'Gerätesuche abgeschlossen');
+ box.innerHTML=d.devices.map((x,i)=>`<div class="device"><span class="status">${esc(x.source||d.mode)}</span><h3>${esc(x.vendor||'Gerät')}</h3><p>${esc(x.model||'')}</p><small>${esc(x.host||'Home Assistant')}${x.entity?' · '+esc(x.entity):''}${x.modbus_id?' · ID '+esc(x.modbus_id):''}</small><div class="actions left"><button class="btn secondary" onclick='useConsumer(${JSON.stringify(kind)},${JSON.stringify(x)})'>Übernehmen</button></div></div>`).join('')||'<div class="callout">Keine passenden Geräte gefunden. Manuelle Eingabe bleibt möglich.</div>'
+}
+function useConsumer(kind,x){
+ if(kind==='wallbox'){
+   const blob=((x.vendor||'')+' '+(x.model||'')+' '+(x.entity||'')).toLowerCase();
+   byId('wb_vendor').value=(blob.includes('sigen')||blob.includes('sigenergy'))?'sigenergy':blob.includes('go-e')?'go-e':'homeassistant';
+   byId('wb_host').value=x.host||byId('host')?.value||'';byId('wb_entity').value=x.entity||'';byId('wb_device_id').value=x.device_id||'';if(x.modbus_id)byId('wb_modbus_id').value=x.modbus_id;
+ }else{
+   byId('hp_mode').value=x.entity?.startsWith('switch.')?'sg-ready':'integration';byId('hp_vendor').value=x.vendor||'';byId('hp_host').value=x.host||'';byId('hp_entity').value=x.entity||'';byId('hp_switch').value=x.entity?.startsWith('switch.')?x.entity:'';byId('hp_device_id').value=x.device_id||'';
+ } toast('Gerät übernommen')
+}
+async function saveWallbox(btn){await action(btn,()=>api('api/wallbox',{method:'POST',body:fd({vendor:byId('wb_vendor').value,host:byId('wb_host').value,entity:byId('wb_entity').value,device_id:byId('wb_device_id').value,modbus_id:byId('wb_modbus_id').value,max_current:byId('wb_current').value,phases:byId('wb_phases').value})}),'Wallbox gespeichert')}
+async function saveHeatpump(btn){await action(btn,()=>api('api/heatpump',{method:'POST',body:fd({mode:byId('hp_mode').value,vendor:byId('hp_vendor').value,host:byId('hp_host').value,entity:byId('hp_entity').value,device_id:byId('hp_device_id').value,switch_entity:byId('hp_switch').value,power_threshold:byId('hp_on').value,off_threshold:byId('hp_off').value,delay_min:byId('hp_delay').value})}),'Wärmepumpe gespeichert')}
 async function installEvcc(btn){await action(btn,()=>api('api/evcc/install',{method:'POST'}),d=>d.message||'evcc installiert')}
 async function configureEvcc(btn){const d=await action(btn,()=>api('api/evcc/configure',{method:'POST'}),'evcc-Konfiguration geschrieben');byId('evccPath').textContent=d.path||''}
 async function makeDashboard(btn){await action(btn,()=>api('api/dashboard',{method:'POST'}),'EnergyKit Dashboard erzeugt')}
@@ -708,9 +813,11 @@ def page(state: dict[str, Any]) -> str:
 </section>
 
 <section class='step'>
-<div class='eyebrow'>VERBRAUCHER</div><h1 class='title'>Wallbox & Wärmepumpe</h1><p class='subtitle'>Optional. EnergyKit bereitet die Steuerung vor, ohne unnötig in Geräteparameter einzugreifen.</p>
-<div class='panel grid2'><label>Wallbox<select id='wb_vendor'>{select_option("none",wb.get("vendor"),"Keine")}{select_option("homeassistant",wb.get("vendor"),"Home Assistant Entity")}{select_option("go-e",wb.get("vendor"),"go-e")}</select></label><label>Host<input id='wb_host' value='{h(wb.get("host"))}'></label><label>Enable Entity<input id='wb_entity' value='{h(wb.get("entity"))}' placeholder='switch.wallbox_enable'></label><label>Max. Strom<input id='wb_current' type='number' value='{h(wb.get("max_current"))}'></label><label>Phasen<input id='wb_phases' type='number' value='{h(wb.get("phases"))}'></label><div></div><div class='span2 actions'><button class='btn' onclick='saveWallbox(this)'>Wallbox speichern</button></div></div>
-<div class='panel grid2'><label>Wärmepumpe<select id='hp_mode'>{select_option("none",hp.get("mode"),"Keine")}{select_option("sg-ready",hp.get("mode"),"SG-Ready")}{select_option("modbus",hp.get("mode"),"Modbus TCP")}{select_option("integration",hp.get("mode"),"HA-Integration")}</select></label><label>Switch / SG-Ready<input id='hp_switch' value='{h(hp.get("switch"))}'></label><label>Aktiv ab Überschuss (W)<input id='hp_on' type='number' value='{h(hp.get("power_threshold"))}'></label><label>Aus unter (W)<input id='hp_off' type='number' value='{h(hp.get("off_threshold"))}'></label><label>Verzögerung (min)<input id='hp_delay' type='number' value='{h(hp.get("delay_min"))}'></label><div></div><div class='span2 actions'><button class='btn' onclick='saveHeatpump(this)'>Wärmepumpe speichern</button></div></div>
+<div class='eyebrow'>VERBRAUCHER</div><h1 class='title'>Wallbox & Wärmepumpe</h1><p class='subtitle'>Geräte automatisch finden oder manuell übernehmen. EnergyKit verwendet vorhandene Home-Assistant-Geräte bevorzugt und ergänzt die LAN-Suche.</p>
+<div class='panel'><div class='panelhead'><div><h3>Wallbox suchen</h3><p>Findet vorhandene Charger in Home Assistant und Netzwerkgeräte. Sigenergy AC Charger werden als eigener Gerätetyp erkannt.</p></div><button class='btn secondary' onclick="discoverConsumer('wallbox',this)">Geräte suchen</button></div><div id='wb_devices' class='devicegrid'></div></div>
+<div class='panel grid2'><label>Wallbox<select id='wb_vendor'>{select_option("none",wb.get("vendor"),"Keine")}{select_option("sigenergy",wb.get("vendor"),"Sigenergy Sigen AC Charger")}{select_option("homeassistant",wb.get("vendor"),"Home Assistant Gerät / Entity")}{select_option("go-e",wb.get("vendor"),"go-e")}</select></label><label>Host / Plant-IP<input id='wb_host' value='{h(wb.get("host"))}' placeholder='z. B. Sigen Plant 192.168.1.50'></label><label>Steuer-Entity<input id='wb_entity' value='{h(wb.get("entity"))}' placeholder='switch / button / select aus Home Assistant'></label><label>HA Device-ID<input id='wb_device_id' value='{h(wb.get("device_id"))}' placeholder='wird bei Gerätesuche übernommen'></label><label>Sigenergy Modbus Device-ID<input id='wb_modbus_id' type='number' min='1' max='247' value='{h(wb.get("modbus_id") or 1)}'></label><label>Max. Strom (A)<input id='wb_current' type='number' min='6' value='{h(wb.get("max_current"))}'></label><label>Phasen<input id='wb_phases' type='number' min='1' max='3' value='{h(wb.get("phases"))}'></label><div></div><div class='span2 callout'><b>Sigenergy:</b> Für einen Sigen AC Charger ist normalerweise die Plant-/Inverter-IP relevant. Die Charger Device-ID muss innerhalb der Plant eindeutig sein. EnergyKit speichert beides getrennt, statt die WLAN-IP der Wallbox blind als Modbus-Ziel zu verwenden.</div><div class='span2 actions'><button class='btn' onclick='saveWallbox(this)'>Wallbox speichern</button><button class='btn secondary' onclick="startFlow('sigenergy',this)">Sigenergy Integration öffnen</button></div></div>
+<div class='panel'><div class='panelhead'><div><h3>Wärmepumpe suchen</h3><p>Durchsucht Home Assistant nach Climate-, Switch- und Hersteller-Geräten und ergänzt erreichbare LAN-/Modbus-Geräte.</p></div><button class='btn secondary' onclick="discoverConsumer('heatpump',this)">Geräte suchen</button></div><div id='hp_devices' class='devicegrid'></div></div>
+<div class='panel grid2'><label>Anbindung<select id='hp_mode'>{select_option("none",hp.get("mode"),"Keine")}{select_option("sg-ready",hp.get("mode"),"SG-Ready / Schaltkontakt")}{select_option("modbus",hp.get("mode"),"Modbus TCP")}{select_option("integration",hp.get("mode"),"Home Assistant Integration")}</select></label><label>Hersteller<input id='hp_vendor' value='{h(hp.get("vendor"))}' placeholder='z. B. Vaillant, Viessmann, NIBE'></label><label>Host / IP<input id='hp_host' value='{h(hp.get("host"))}' placeholder='optional bei Integration'></label><label>HA Haupt-Entity<input id='hp_entity' value='{h(hp.get("entity"))}' placeholder='climate.meine_waermepumpe'></label><label>SG-Ready / Freigabe-Switch<input id='hp_switch' value='{h(hp.get("switch"))}' placeholder='switch.sg_ready'></label><label>HA Device-ID<input id='hp_device_id' value='{h(hp.get("device_id"))}' placeholder='wird bei Gerätesuche übernommen'></label><label>Aktiv ab Überschuss (W)<input id='hp_on' type='number' value='{h(hp.get("power_threshold"))}'></label><label>Aus unter (W)<input id='hp_off' type='number' value='{h(hp.get("off_threshold"))}'></label><label>Verzögerung (min)<input id='hp_delay' type='number' value='{h(hp.get("delay_min"))}'></label><div></div><div class='span2 callout'>Bei SG-Ready automatisiert EnergyKit nur den von dir ausgewählten Freigabe-Switch. Bei einer vollständigen HA-Integration bleibt die herstellerspezifische Regelung unangetastet.</div><div class='span2 actions'><button class='btn' onclick='saveHeatpump(this)'>Wärmepumpe speichern</button></div></div>
 </section>
 
 <section class='step'>
@@ -844,6 +951,39 @@ async def discover(request: Request):
     return {"mode": "live", "devices": await scan_live()}
 
 
+@app.get("/api/discover/consumers")
+async def discover_consumers(request: Request, kind: str):
+    state = ensure_access(request)
+    if kind not in {"wallbox", "heatpump"}:
+        raise HTTPException(400, "kind muss wallbox oder heatpump sein")
+    if state["simulation"]:
+        if kind == "wallbox":
+            return {"mode": "simulation", "devices": [
+                {"source":"homeassistant","kind":"wallbox","vendor":"Sigenergy","model":"Sigen AC Charger 11 kW","host":"192.168.1.42","entity":"button.sigen_ac_charger_start_charging","device_id":"sim-sigen-ac","modbus_id":1,"sigenergy_ac_charger":True},
+                {"source":"network","kind":"wallbox","vendor":"go-e","model":"Charger Gemini","host":"192.168.1.54","entity":"switch.wallbox_enable"},
+            ]}
+        return {"mode": "simulation", "devices": [
+            {"source":"homeassistant","kind":"heatpump","vendor":"Vaillant","model":"aroTHERM plus","host":"192.168.1.71","entity":"climate.waermepumpe","device_id":"sim-hp-1"},
+            {"source":"homeassistant","kind":"heatpump","vendor":"SG-Ready","model":"Freigabekontakt","host":"","entity":"switch.sg_ready","device_id":"sim-hp-2"},
+        ]}
+
+    devices = await discover_ha_consumers(kind)
+    network = await scan_live()
+    for n in network:
+        # Network-only candidates are deliberately labelled as candidates, not
+        # guessed manufacturers. Port 502 is useful for both chargers and HPs.
+        if 502 not in n.get("ports", []) and kind == "heatpump":
+            continue
+        if kind == "wallbox" and not any(p in n.get("ports", []) for p in (502,80,443)):
+            continue
+        devices.append({
+            "source":"network", "kind":kind, "vendor":n.get("vendor","Netzwerkgerät"),
+            "model": ("Modbus/LAN Kandidat" if 502 in n.get("ports",[]) else n.get("model","Netzwerkgerät")),
+            "host":n.get("host",""), "entity":"", "ports":n.get("ports",[]),
+        })
+    return {"mode":"live", "devices":devices}
+
+
 @app.post("/api/device")
 async def save_device(request: Request, vendor: str = Form(...), host: str = Form(...), port: int = Form(502)):
     state = ensure_access(request)
@@ -959,19 +1099,22 @@ async def mapping(request: Request):
 
 
 @app.post("/api/wallbox")
-async def wallbox(request: Request, vendor: str = Form(...), host: str = Form(""), entity: str = Form(""), max_current: int = Form(16), phases: int = Form(3)):
+async def wallbox(request: Request, vendor: str = Form(...), host: str = Form(""), entity: str = Form(""), device_id: str = Form(""), modbus_id: int = Form(1), max_current: int = Form(16), phases: int = Form(3)):
     state = ensure_access(request)
-    state["wallbox"] = {"vendor": vendor, "host": host.strip(), "entity": entity.strip(), "max_current": max_current, "phases": phases}
+    if vendor == "sigenergy" and not host.strip() and not state["simulation"]:
+        # Prefer the already configured Sigen plant host when available.
+        host = str(state.get("energy", {}).get("host") or "")
+    state["wallbox"] = {"vendor": vendor, "host": host.strip(), "entity": entity.strip(), "device_id": device_id.strip(), "modbus_id": max(1,min(247,modbus_id)), "max_current": max(6,max_current), "phases": max(1,min(3,phases))}
     if state["simulation"] and vendor != "none" and not state["wallbox"]["entity"]:
-        state["wallbox"]["entity"] = "switch.wallbox_enable"
+        state["wallbox"]["entity"] = "button.sigen_ac_charger_start_charging" if vendor == "sigenergy" else "switch.wallbox_enable"
     save_state(state)
-    return {"ok": True}
+    return {"ok": True, "wallbox": state["wallbox"]}
 
 
 @app.post("/api/heatpump")
-async def heatpump(request: Request, mode: str = Form(...), switch_entity: str = Form(""), power_threshold: int = Form(2500), off_threshold: int = Form(800), delay_min: int = Form(5)):
+async def heatpump(request: Request, mode: str = Form(...), vendor: str = Form(""), host: str = Form(""), entity: str = Form(""), device_id: str = Form(""), switch_entity: str = Form(""), power_threshold: int = Form(2500), off_threshold: int = Form(800), delay_min: int = Form(5)):
     state = ensure_access(request)
-    state["heatpump"] = {"mode": mode, "switch": switch_entity.strip(), "power_threshold": power_threshold, "off_threshold": off_threshold, "delay_min": delay_min}
+    state["heatpump"] = {"mode": mode, "vendor": vendor.strip(), "host": host.strip(), "entity": entity.strip(), "device_id": device_id.strip(), "switch": switch_entity.strip(), "power_threshold": max(0,power_threshold), "off_threshold": max(0,off_threshold), "delay_min": max(1,delay_min)}
     if state["simulation"] and mode == "sg-ready" and not state["heatpump"]["switch"]:
         state["heatpump"]["switch"] = "switch.sg_ready"
     save_state(state)
@@ -1106,6 +1249,14 @@ async def diagnostics(request: Request):
         "simulation": state.get("simulation"),
         "components": state.get("components", {}),
     }
+    bootstrap_status = HA / "energykit_bootstrap_status.json"
+    if bootstrap_status.exists():
+        try:
+            result["first_boot_bootstrap"] = json.loads(bootstrap_status.read_text())
+        except Exception as exc:
+            result["first_boot_bootstrap"] = {"ok": False, "error": f"Statusdatei unlesbar: {exc}"}
+    else:
+        result["first_boot_bootstrap"] = {"ok": True, "stage": "status-file-not-present-or-cleaned"}
     try:
         info = await sup("GET", "/info")
         result["supervisor"] = {"ok": True, "version": info.get("supervisor"), "core": info.get("homeassistant"), "os": info.get("hassos"), "state": info.get("state")}

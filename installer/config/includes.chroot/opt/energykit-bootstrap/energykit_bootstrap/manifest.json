@@ -1,0 +1,7 @@
+{
+  "domain": "energykit_bootstrap",
+  "name": "EnergyKit First Boot Bootstrap",
+  "version": "0.5.9",
+  "documentation": "https://github.com/nussfuellung/energykit-appliance",
+  "codeowners": []
+}

@@ -267,3 +267,12 @@ Der v0.5.7 Hard-Fix ist enthalten:
 - `gfxterm` + `png`
 - vereinfachtes GRUB-2.06-Theme
 - kein konkurrierender `grub-efi` Customization-Baum
+
+
+## v0.5.9 – First-Boot Installer + Verbraucher-Suche
+
+- `apps.json` wird vom ISO-Installer nicht mehr verändert.
+- Die lokale EnergyKit-Store-Quelle wird vorinstalliert.
+- Ein einmaliges Home-Assistant-Custom-Component nutzt den echten Core-`SUPERVISOR_TOKEN`, lädt den Store neu und installiert/startet `local_energykit` über die Supervisor-API.
+- Wallboxen und Wärmepumpen besitzen eigene Geräte-Suche aus HA Device/Entity Registry plus LAN-Kandidaten.
+- Sigenergy Sigen AC Charger ist als eigener Wallbox-Typ enthalten, inklusive Plant-IP und Modbus Device-ID.

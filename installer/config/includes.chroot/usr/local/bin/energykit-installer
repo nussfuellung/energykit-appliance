@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -130,11 +131,6 @@ def preseed(target):
         supervisor = MOUNT / "supervisor"
         local_app = supervisor / "apps" / "local" / "energykit"
         local_app.mkdir(parents=True, exist_ok=True)
-        # HAOS/Supervisor 2026 app runtime directory. Without this directory
-        # Supervisor cannot atomically create options.json for a preseeded app.
-        app_data = supervisor / "apps" / "data" / "local_energykit"
-        app_data.mkdir(parents=True, exist_ok=True)
-        os.chmod(app_data, 0o755)
         for src in PRELOAD.iterdir():
             dst = local_app / src.name
             if src.is_dir():
@@ -149,52 +145,31 @@ def preseed(target):
         if "__REPOSITORY_URL__" in str(config.get("url", "")):
             raise RuntimeError("EnergyKit Repository-URL wurde beim ISO-Build nicht gerendert")
 
-        slug = config["slug"]
-        installed_slug = f"local_{slug}"
-        system_cfg = dict(config)
-        system_cfg["repository"] = "local"
-        system_cfg["translations"] = {}
-        resolved_image = config["image"].replace("{arch}", "amd64")
-
-        # IMPORTANT:
-        # Do not fabricate Supervisor credentials here.
-        #
-        # This intentionally mirrors Supervisor AppsData.install(): mark the app
-        # installed with only version/image/options. On first automatic boot,
-        # Supervisor App.start() creates the access token itself, persists it,
-        # writes options and injects SUPERVISOR_TOKEN into the container.
-        #
-        # UUID, ingress token and other defaults are filled by Supervisor's
-        # apps.json schema during load.
-        user_cfg = {
-            "version": str(config["version"]),
-            "image": resolved_image,
-            "options": dict(config.get("options") or {}),
-        }
-
-        apps_file = supervisor / "apps.json"
-        data = {"user": {}, "system": {}}
-        if apps_file.exists():
-            try:
-                data = json.loads(apps_file.read_text())
-            except Exception:
-                pass
-        data.setdefault("user", {})[installed_slug] = user_cfg
-        data.setdefault("system", {})[installed_slug] = system_cfg
-        apps_file.parent.mkdir(parents=True, exist_ok=True)
-        apps_file.write_text(json.dumps(data, indent=2) + "\n")
-        os.chmod(apps_file, 0o600)
+        # Source-only preseed. apps.json is intentionally untouched. A small
+        # Home Assistant custom integration performs the real Supervisor Store
+        # install on first boot using Core's genuine SUPERVISOR_TOKEN.
+        ha = supervisor / "homeassistant"
+        cc = ha / "custom_components" / "energykit_bootstrap"
+        src_boot = Path("/opt/energykit-bootstrap/energykit_bootstrap")
+        if cc.exists(): shutil.rmtree(cc)
+        cc.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src_boot, cc)
+        cfg = ha / "configuration.yaml"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        text = cfg.read_text() if cfg.exists() else "default_config:\n"
+        if not re.search(r"(?m)^energykit_bootstrap\s*:", text):
+            text += "\n# EnergyKit Appliance first-boot installer\nenergykit_bootstrap:\n"
+            cfg.write_text(text)
 
         marker = supervisor / "energykit-preseed.json"
         marker.write_text(json.dumps({
             "energykit_version": config["version"],
             "haos_version": HAOS_VERSION,
-            "image": resolved_image,
-            "installed_slug": installed_slug,
-            "mode": "supervisor-token-on-first-start",
+            "installed_slug": "local_energykit",
+            "mode": "core-supervisor-install-bootstrap",
         }, indent=2) + "\n")
-        print("✓ EnergyKit als installierte lokale HAOS-App vorgemerkt")
-        print("✓ Supervisor wird das gepinnte EnergyKit-Image beim ersten Start laden")
+        print("✓ EnergyKit lokale Store-Quelle provisioniert")
+        print("✓ Home Assistant installiert EnergyKit beim ersten Start über Supervisor")
     finally:
         run("sync", capture=False)
         run("umount", str(MOUNT), capture=False)

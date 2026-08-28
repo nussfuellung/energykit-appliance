@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -512,9 +513,6 @@ class Installer(tk.Tk):
             supervisor=MOUNT/"supervisor"
             local_app=supervisor/"apps"/"local"/"energykit"
             local_app.mkdir(parents=True,exist_ok=True)
-            app_data=supervisor/"apps"/"data"/"local_energykit"
-            app_data.mkdir(parents=True,exist_ok=True)
-            os.chmod(app_data,0o755)
             for src in PRELOAD.iterdir():
                 dst=local_app/src.name
                 if src.is_dir():
@@ -525,31 +523,27 @@ class Installer(tk.Tk):
             config=yaml.safe_load((local_app/"config.yaml").read_text())
             if not config.get("image") or "__IMAGE_BASE__" in config["image"]:
                 raise RuntimeError("EnergyKit Image-URL wurde nicht gerendert.")
-            slug=config["slug"]; installed_slug=f"local_{slug}"
-            system_cfg=dict(config); system_cfg["repository"]="local"; system_cfg["translations"]={}
-            resolved_image=config["image"].replace("{arch}","amd64")
 
-            # Leave credential creation to Supervisor App.start(). This mirrors
-            # AppsData.install() and prevents a preseeded token from bypassing
-            # Supervisor's normal token lifecycle.
-            user_cfg={
-                "version":str(config["version"]),
-                "image":resolved_image,
-                "options":dict(config.get("options") or {}),
-            }
-            apps_file=supervisor/"apps.json"
-            data={"user":{},"system":{}}
-            if apps_file.exists():
-                try: data=json.loads(apps_file.read_text())
-                except Exception: pass
-            data.setdefault("user",{})[installed_slug]=user_cfg
-            data.setdefault("system",{})[installed_slug]=system_cfg
-            apps_file.parent.mkdir(parents=True,exist_ok=True)
-            apps_file.write_text(json.dumps(data,indent=2)+"\n")
-            os.chmod(apps_file,0o600)
-            (supervisor/"energykit-preseed.json").write_text(json.dumps({
+            # Do not touch apps.json. Preseed only the local store source and a
+            # tiny Home Assistant bootstrap integration. Home Assistant Core
+            # already has a real SUPERVISOR_TOKEN and asks Supervisor to perform
+            # the actual local_energykit installation on first boot.
+            ha=supervisor/"homeassistant"
+            cc=ha/"custom_components"/"energykit_bootstrap"
+            src_boot=Path("/opt/energykit-bootstrap/energykit_bootstrap")
+            if cc.exists(): shutil.rmtree(cc)
+            cc.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copytree(src_boot,cc)
+            cfg=ha/"configuration.yaml"
+            cfg.parent.mkdir(parents=True,exist_ok=True)
+            text=cfg.read_text() if cfg.exists() else "default_config:\n"
+            if not re.search(r"(?m)^energykit_bootstrap\s*:",text):
+                text += "\n# EnergyKit Appliance first-boot installer\nenergykit_bootstrap:\n"
+                cfg.write_text(text)
+            marker=supervisor/"energykit-preseed.json"
+            marker.write_text(json.dumps({
                 "energykit_version":config["version"],"haos_version":HAOS_VERSION,
-                "image":resolved_image,"installed_slug":installed_slug,"mode":"supervisor-token-on-first-start",
+                "installed_slug":"local_energykit","mode":"core-supervisor-install-bootstrap",
             },indent=2)+"\n")
         finally:
             run("sync",capture=False)
