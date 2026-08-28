@@ -269,10 +269,56 @@ Der v0.5.7 Hard-Fix ist enthalten:
 - kein konkurrierender `grub-efi` Customization-Baum
 
 
-## v0.5.9 – First-Boot Installer + Verbraucher-Suche
+## v0.6.0 – First-Boot Installer + Verbraucher-Suche
 
 - `apps.json` wird vom ISO-Installer nicht mehr verändert.
 - Die lokale EnergyKit-Store-Quelle wird vorinstalliert.
 - Ein einmaliges Home-Assistant-Custom-Component nutzt den echten Core-`SUPERVISOR_TOKEN`, lädt den Store neu und installiert/startet `local_energykit` über die Supervisor-API.
 - Wallboxen und Wärmepumpen besitzen eigene Geräte-Suche aus HA Device/Entity Registry plus LAN-Kandidaten.
 - Sigenergy Sigen AC Charger ist als eigener Wallbox-Typ enthalten, inklusive Plant-IP und Modbus Device-ID.
+
+
+## v0.6.0 – klare Energiemanagement-Architektur
+
+- EnergyKit richtet Geräte ein und normalisiert Messwerte.
+- evcc ist die einzige Laufzeit-Energiemanagement-Engine.
+- Die EnergyKit Bridge schaltet keine SG-Ready-Relais mehr.
+- Wallboxen verwenden bevorzugt native evcc-Treiber. Sigenergy EVAC: `sigenergy`, EVDC: `sigenergy-evdc`.
+- Wärmepumpen verwenden native evcc-Heizgeräte-Templates bzw. einen expliziten SG-Ready/HA-Fallback.
+- Home-Assistant-Entities dienen bei direkt unterstützter Hardware nicht als Steuerpfad.
+- Neues Kundendashboard mit Home-Assistant-Standardkarten, ohne Mushroom-Abhängigkeit.
+
+
+## 0.6.0 – direkte evcc-Messpfade
+
+Für unterstützte Energiesysteme bevorzugt EnergyKit jetzt auch bei den Messwerten
+den direkten evcc-Pfad.
+
+Bei Sigenergy werden Grid, PV und Batterie aus der Sigen-Plant direkt über den
+nativen evcc-Modbus-Treiber gelesen. Die normalisierten `sensor.ek_*`-Entities
+bleiben für Dashboard, Diagnose und als Fallback für nicht nativ unterstützte
+Systeme erhalten, sind aber bei Sigenergy nicht mehr Teil des Regelpfads.
+
+Zielarchitektur:
+
+`EnergyKit -> evcc -> Wechselrichter / Batterie / Wallbox / Wärmepumpe`
+
+Home Assistant bleibt Visualisierung, Geräteverwaltung und Fallback, nicht die
+zwingende Zwischenstation der Energieregelung.
+
+
+### Deye Direct-first (0.6.0)
+
+Deye ist jetzt ebenfalls direkt an evcc angebunden.
+
+Unterstützte EnergyKit-Profile:
+- `deye-hybrid-3p` für typische dreiphasige Deye Hybrid/SUN-SG04-Systeme
+- `deye-storage` für Deye Storage/Hybrid
+- `deye-mi` für Deye Micro Inverter
+
+Bei Hybrid/Storage liest evcc Netz, PV und Batterie direkt über Modbus TCP.
+Beim Micro-Inverter wird PV direkt gelesen; Grid/Batterie bleiben mangels dieser
+Messrollen beim Micro-Profil auf dem EnergyKit/Home-Assistant-Fallback.
+
+Für Deye Hybrid kann EnergyKit zusätzlich LV/HV sowie den Firmware-1098-Modus
+setzen. Sigenergy verwendet das aktuelle evcc-Meter-Template `sigenergy`.

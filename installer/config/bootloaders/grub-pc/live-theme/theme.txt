@@ -30,7 +30,7 @@ desktop-color: "#06101c"
   left = 7%
   top = 82%
   width = 46%
-  text = "H-IT Solutions  |  EnergyKit v0.5.9"
+  text = "H-IT Solutions  |  EnergyKit v0.6.0"
   color = "#7f91a3"
   font = "DejaVu Sans 14"
 }

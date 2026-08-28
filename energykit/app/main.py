@@ -20,7 +20,7 @@ import websockets
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
-APP_VERSION = "0.5.9"
+APP_VERSION = "0.6.0"
 SUPERVISOR = "http://supervisor"
 TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 DATA = Path("/config")
@@ -40,10 +40,10 @@ DEFAULT_STATE: dict[str, Any] = {
     "service_password": None,
     "customer": {"name": "", "installation_id": "", "location": "", "installer": ""},
     "components": {},
-    "energy": {"vendor": None, "host": None, "port": 502, "configured": False},
+    "energy": {"vendor": None, "host": None, "port": 502, "modbus_id": 1, "deye_profile": "deye-hybrid-3p", "deye_batterytype": "lv", "deye_firmware1098": False, "configured": False},
     "mapping": {},
-    "wallbox": {"vendor": "none", "host": "", "entity": "", "device_id": "", "modbus_id": 1, "max_current": 16, "phases": 3},
-    "heatpump": {"mode": "none", "vendor": "", "host": "", "entity": "", "switch": "", "device_id": "", "power_threshold": 2500, "off_threshold": 800, "delay_min": 5},
+    "wallbox": {"vendor": "none", "model": "", "host": "", "port": 502, "entity": "", "device_id": "", "modbus_id": 1, "evcc_template": "", "control_path": "native", "max_current": 16, "phases": 3},
+    "heatpump": {"mode": "none", "vendor": "", "model": "", "host": "", "port": 502, "entity": "", "switch": "", "switch_b": "", "device_id": "", "modbus_id": 1, "evcc_template": "", "control_path": "native", "min_power": 1200, "max_power": 6000},
     "evcc": {"installed": False, "slug": None, "configured": False, "config_path": None},
     "dashboard": {"installed": False},
     "last_backup": None,
@@ -511,15 +511,148 @@ async def find_evcc_slug() -> str | None:
     return None
 
 
-def evcc_yaml(state: dict[str, Any]) -> str:
-    wall = state["wallbox"]
-    lines = [
-        "network:",
-        "  schema: http",
-        "  host: 0.0.0.0",
-        "  port: 7070",
-        "interval: 30s",
-        "meters:",
+def _evcc_native_wallbox(wall: dict[str, Any]) -> list[str]:
+    """Build an evcc charger block. Native device drivers always win over HA entities."""
+    vendor = str(wall.get("vendor") or "").lower()
+    template = str(wall.get("evcc_template") or "").strip()
+    if not template:
+        template = {
+            "sigenergy": "sigenergy",
+            "sigenergy-evdc": "sigenergy-evdc",
+            "go-e": "go-e-v3",
+            "openwb": "openwb",
+        }.get(vendor, "")
+    if template and wall.get("host"):
+        lines = ["  - name: wallbox", "    type: template", f"    template: {template}"]
+        if template in {"sigenergy", "sigenergy-evdc"}:
+            lines += ["    modbus: tcpip", f"    id: {int(wall.get('modbus_id') or 1)}"]
+        lines += [f"    host: {wall['host']}"]
+        if template in {"sigenergy", "sigenergy-evdc"} or int(wall.get("port") or 0) not in (0, 80):
+            lines += [f"    port: {int(wall.get('port') or 502)}"]
+        return lines
+    # Last-resort compatibility path only for unsupported hardware.
+    if wall.get("control_path") == "homeassistant" and wall.get("entity"):
+        return [
+            "  - name: wallbox", "    type: template", "    template: homeassistant-switch",
+            "    uri: http://homeassistant.local:8123", f"    switch: {wall['entity']}",
+        ]
+    return []
+
+
+def _evcc_heatpump(hp: dict[str, Any]) -> list[str]:
+    """Build an evcc heating charger. EnergyKit never performs runtime SG-Ready control."""
+    mode = str(hp.get("mode") or "none")
+    template = str(hp.get("evcc_template") or "").strip()
+    if mode == "none":
+        return []
+    if template and hp.get("host"):
+        lines = ["  - name: heatpump", "    type: template", f"    template: {template}"]
+        # Most native heat-pump templates in evcc use Modbus TCP.
+        lines += ["    modbus: tcpip", f"    id: {int(hp.get('modbus_id') or 1)}", f"    host: {hp['host']}", f"    port: {int(hp.get('port') or 502)}"]
+        return lines
+    # Generic SG Ready relay support. This is intentionally an evcc device,
+    # not an EnergyKit/Home Assistant automation.
+    if mode == "sg-ready" and hp.get("switch"):
+        # evcc owns the SG-Ready state machine. Home Assistant is only used as
+        # a relay transport when the physical dry contact is exposed there.
+        lines = [
+            "  - name: heatpump", "    type: sgready-relay",
+            "    boost:", "      type: template", "      template: homeassistant-switch",
+            "      uri: http://homeassistant.local:8123", f"      switch: {hp['switch']}",
+        ]
+        if hp.get("switch_b"):
+            lines += [
+                "    dim:", "      type: template", "      template: homeassistant-switch",
+                "      uri: http://homeassistant.local:8123", f"      switch: {hp['switch_b']}",
+            ]
+        return lines
+    # HA is a compatibility fallback when evcc has no native driver for the unit.
+    if hp.get("control_path") == "homeassistant" and hp.get("switch"):
+        return [
+            "  - name: heatpump", "    type: template", "    template: homeassistant-switch",
+            "    uri: http://homeassistant.local:8123", f"    switch: {hp['switch']}",
+            "    integrateddevice: true", "    heating: true",
+        ]
+    return []
+
+
+
+def _evcc_energy_meters(energy: dict[str, Any]) -> list[str]:
+    """Build the preferred meter path for evcc.
+
+    Supported plants are read directly by evcc. HA normalized sensors are only
+    a compatibility fallback for hardware without a native/direct evcc driver.
+    """
+    vendor = str(energy.get("vendor") or "").strip().lower()
+    host = str(energy.get("host") or "").strip()
+    port = int(energy.get("port") or 502)
+    modbus_id = int(energy.get("modbus_id") or 1)
+
+    if vendor == "sigenergy" and host:
+        lines = []
+        for name, usage in (("grid", "grid"), ("pv", "pv"), ("battery", "battery")):
+            lines += [
+                f"  - name: {name}",
+                "    type: template",
+                "    template: sigenergy",
+                f"    usage: {usage}",
+                f"    host: {host}",
+                f"    port: {port}",
+                f"    id: {modbus_id}",
+            ]
+        return lines
+
+    if vendor == "deye" and host:
+        profile = str(energy.get("deye_profile") or "deye-hybrid-3p")
+        if profile not in {"deye-hybrid-3p", "deye-storage", "deye-mi"}:
+            profile = "deye-hybrid-3p"
+
+        # Micro inverters expose PV production only. Grid/battery therefore
+        # remain on EnergyKit's HA fallback unless separate meters are added.
+        if profile == "deye-mi":
+            return [
+                "  - name: grid",
+                "    type: template",
+                "    template: homeassistant",
+                "    usage: grid",
+                "    uri: http://homeassistant.local:8123",
+                "    power: sensor.ek_grid_power",
+                "  - name: pv",
+                "    type: template",
+                "    template: deye-mi",
+                "    usage: pv",
+                "    modbus: tcpip",
+                f"    id: {modbus_id}",
+                f"    host: {host}",
+                f"    port: {port}",
+                "  - name: battery",
+                "    type: template",
+                "    template: homeassistant",
+                "    usage: battery",
+                "    uri: http://homeassistant.local:8123",
+                "    power: sensor.ek_battery_power",
+                "    soc: sensor.ek_battery_soc",
+            ]
+
+        lines = []
+        for name, usage in (("grid", "grid"), ("pv", "pv"), ("battery", "battery")):
+            lines += [
+                f"  - name: {name}",
+                "    type: template",
+                f"    template: {profile}",
+                f"    usage: {usage}",
+                "    modbus: tcpip",
+                f"    id: {modbus_id}",
+                f"    host: {host}",
+                f"    port: {port}",
+            ]
+            if profile == "deye-hybrid-3p":
+                lines += [f"    batterytype: {str(energy.get('deye_batterytype') or 'lv')}"]
+                if bool(energy.get("deye_firmware1098")):
+                    lines += ["    firmware1098: true"]
+        return lines
+
+    return [
         "  - name: grid",
         "    type: template",
         "    template: homeassistant",
@@ -539,28 +672,35 @@ def evcc_yaml(state: dict[str, Any]) -> str:
         "    uri: http://homeassistant.local:8123",
         "    power: sensor.ek_battery_power",
         "    soc: sensor.ek_battery_soc",
-        "site:",
-        "  title: EnergyKit",
-        "  meters:",
-        "    grid: grid",
-        "    pv: [pv]",
-        "    battery: [battery]",
     ]
-    if wall.get("entity"):
+
+
+def evcc_yaml(state: dict[str, Any]) -> str:
+    wall = state["wallbox"]
+    hp = state["heatpump"]
+    lines = [
+        "network:", "  schema: http", "  host: 0.0.0.0", "  port: 7070", "interval: 30s",
+        "meters:",
+    ]
+    lines += _evcc_energy_meters(state["energy"])
+    lines += [
+        "site:", "  title: EnergyKit", "  meters:", "    grid: grid", "    pv: [pv]", "    battery: [battery]",
+    ]
+    chargers = _evcc_native_wallbox(wall) + _evcc_heatpump(hp)
+    if chargers:
+        lines += ["chargers:"] + chargers
+    if _evcc_native_wallbox(wall):
         lines += [
-            "chargers:",
-            "  - name: wallbox",
-            "    type: template",
-            "    template: homeassistant-switch",
-            "    uri: http://homeassistant.local:8123",
-            f"    switch: {wall['entity']}",
-            "loadpoints:",
-            "  - title: Wallbox",
-            "    charger: wallbox",
-            "    mode: pv",
-            f"    phases: {int(wall.get('phases') or 3)}",
-            f"    mincurrent: 6",
-            f"    maxcurrent: {int(wall.get('max_current') or 16)}",
+            "loadpoints:", "  - title: Wallbox", "    charger: wallbox", "    mode: pv",
+            f"    phases: {int(wall.get('phases') or 3)}", "    mincurrent: 6", f"    maxcurrent: {int(wall.get('max_current') or 16)}",
+        ]
+    if _evcc_heatpump(hp):
+        if "loadpoints:" not in lines:
+            lines += ["loadpoints:"]
+        lines += [
+            "  - title: Wärmepumpe", "    charger: heatpump", "    mode: pv",
+            "    phases: 1", f"    mincurrent: {max(1, int((hp.get('min_power') or 1200) / 230))}",
+            f"    maxcurrent: {max(1, int((hp.get('max_power') or 6000) / 230))}",
         ]
     return "\n".join(lines) + "\n"
 
@@ -605,7 +745,7 @@ async def final_checks(state: dict[str, Any]) -> list[dict[str, Any]]:
     add("Dashboard erzeugt", bool(state["dashboard"].get("installed")))
     add("evcc installiert", bool(state["evcc"].get("installed")))
     add("evcc konfiguriert", bool(state["evcc"].get("configured")))
-    add("Wärmepumpe konfiguriert", state["heatpump"].get("mode") in {"none", "sg-ready", "modbus", "integration"})
+    add("Wärmepumpe konfiguriert", state["heatpump"].get("mode") in {"none", "native", "sg-ready", "integration"})
     add("Wallbox konfiguriert", state["wallbox"].get("vendor") == "none" or bool(state["wallbox"].get("entity") or state["wallbox"].get("host")))
     if state["simulation"]:
         add("Simulationsdaten plausibel", True, "PV 6.24 kW · SoC 74 %")
@@ -702,7 +842,15 @@ async function saveCustomer(btn){await action(btn,()=>api('api/customer',{method
 async function createService(btn){if(!await modal('Service-Zugang anlegen','EnergyKit legt einen separaten Home-Assistant-Administrator für Wartung und die spätere EnergyKit-App an.','Benutzer anlegen'))return;const d=await action(btn,()=>api('api/service-user',{method:'POST'}),'Service-Benutzer angelegt');byId('serviceResult').innerHTML=`<div class="callout"><b>Zugangsdaten jetzt sichern.</b><div class="codebox" style="margin-top:10px">Benutzer: ${esc(d.username)}\nPasswort: ${esc(d.password||'bereits erzeugt')}</div><div class="actions left"><button class="btn secondary" id="dlCred">Zugangsdaten herunterladen</button></div></div>`;byId('dlCred').onclick=()=>downloadText('energykit-service.txt',`EnergyKit Service\nBenutzer: ${d.username}\nPasswort: ${d.password||''}\n`)}
 async function discover(btn){const box=byId('devices');box.innerHTML='<div class="callout">Suche im Netzwerk …</div>';const d=await action(btn,()=>api('api/discover'),'Gerätesuche abgeschlossen');box.innerHTML=d.devices.map(x=>`<div class="device"><span class="status">${esc(d.mode)}</span><h3>${esc(x.vendor)}</h3><p>${esc(x.model)}</p><small>${esc(x.host)} · ${esc((x.ports||[]).join(', '))}</small><div class="actions left"><button class="btn secondary" onclick="useDevice('${esc(x.vendor)}','${esc(x.host)}',${x.port||x.ports?.[0]||502})">Verwenden</button></div></div>`).join('')||'<div class="callout">Keine Geräte gefunden.</div>'}
 function useDevice(v,h,p){byId('vendor').value=v.toLowerCase().includes('deye')?'deye':'sigenergy';byId('host').value=h;byId('port').value=p;toast('Gerät übernommen')}
-async function saveDevice(btn){await action(btn,()=>api('api/device',{method:'POST',body:fd({vendor:byId('vendor').value,host:byId('host').value,port:byId('port').value})}),'Energiesystem gespeichert')}
+async function saveDevice(btn){await action(btn,()=>api('api/device',{method:'POST',body:fd({
+vendor:byId('vendor').value,
+host:byId('host').value,
+port:byId('port').value,
+modbus_id:byId('energy_modbus_id').value,
+deye_profile:byId('deye_profile').value,
+deye_batterytype:byId('deye_batterytype').value,
+deye_firmware1098:byId('deye_firmware1098').checked?'true':'false'
+})}),'Energiesystem gespeichert')}
 async function installComp(n,btn){
   const d=await action(btn,()=>api(`api/components/${n}`,{method:'POST'}),x=>`${n}: ${x.version||'installiert'}`);
   if(d.restart_required){
@@ -728,13 +876,14 @@ function useConsumer(kind,x){
  if(kind==='wallbox'){
    const blob=((x.vendor||'')+' '+(x.model||'')+' '+(x.entity||'')).toLowerCase();
    byId('wb_vendor').value=(blob.includes('sigen')||blob.includes('sigenergy'))?'sigenergy':blob.includes('go-e')?'go-e':'homeassistant';
-   byId('wb_host').value=x.host||byId('host')?.value||'';byId('wb_entity').value=x.entity||'';byId('wb_device_id').value=x.device_id||'';if(x.modbus_id)byId('wb_modbus_id').value=x.modbus_id;
+   byId('wb_host').value=x.host||byId('host')?.value||'';byId('wb_entity').value=x.entity||'';byId('wb_device_id').value=x.device_id||'';byId('wb_model').value=x.model||'';if(x.modbus_id)byId('wb_modbus_id').value=x.modbus_id;
+   if(blob.includes('sigen')||blob.includes('sigenergy')){byId('wb_control').value='native';byId('wb_template').value=blob.includes('evdc')?'sigenergy-evdc':'sigenergy'}
  }else{
-   byId('hp_mode').value=x.entity?.startsWith('switch.')?'sg-ready':'integration';byId('hp_vendor').value=x.vendor||'';byId('hp_host').value=x.host||'';byId('hp_entity').value=x.entity||'';byId('hp_switch').value=x.entity?.startsWith('switch.')?x.entity:'';byId('hp_device_id').value=x.device_id||'';
+   byId('hp_mode').value=x.entity?.startsWith('switch.')?'sg-ready':'native';byId('hp_vendor').value=x.vendor||'';byId('hp_model').value=x.model||'';byId('hp_host').value=x.host||'';byId('hp_entity').value=x.entity||'';byId('hp_switch').value=x.entity?.startsWith('switch.')?x.entity:'';byId('hp_device_id').value=x.device_id||'';
  } toast('Gerät übernommen')
 }
-async function saveWallbox(btn){await action(btn,()=>api('api/wallbox',{method:'POST',body:fd({vendor:byId('wb_vendor').value,host:byId('wb_host').value,entity:byId('wb_entity').value,device_id:byId('wb_device_id').value,modbus_id:byId('wb_modbus_id').value,max_current:byId('wb_current').value,phases:byId('wb_phases').value})}),'Wallbox gespeichert')}
-async function saveHeatpump(btn){await action(btn,()=>api('api/heatpump',{method:'POST',body:fd({mode:byId('hp_mode').value,vendor:byId('hp_vendor').value,host:byId('hp_host').value,entity:byId('hp_entity').value,device_id:byId('hp_device_id').value,switch_entity:byId('hp_switch').value,power_threshold:byId('hp_on').value,off_threshold:byId('hp_off').value,delay_min:byId('hp_delay').value})}),'Wärmepumpe gespeichert')}
+async function saveWallbox(btn){await action(btn,()=>api('api/wallbox',{method:'POST',body:fd({vendor:byId('wb_vendor').value,model:byId('wb_model').value,host:byId('wb_host').value,port:byId('wb_port').value,entity:byId('wb_entity').value,device_id:byId('wb_device_id').value,modbus_id:byId('wb_modbus_id').value,evcc_template:byId('wb_template').value,control_path:byId('wb_control').value,max_current:byId('wb_current').value,phases:byId('wb_phases').value})}),'Wallbox gespeichert')}
+async function saveHeatpump(btn){await action(btn,()=>api('api/heatpump',{method:'POST',body:fd({mode:byId('hp_mode').value,vendor:byId('hp_vendor').value,model:byId('hp_model').value,host:byId('hp_host').value,port:byId('hp_port').value,entity:byId('hp_entity').value,device_id:byId('hp_device_id').value,switch_entity:byId('hp_switch').value,switch_b:byId('hp_switch_b').value,modbus_id:byId('hp_modbus_id').value,evcc_template:byId('hp_template').value,control_path:byId('hp_control').value,min_power:byId('hp_min_power').value,max_power:byId('hp_max_power').value})}),'Wärmepumpe gespeichert')}
 async function installEvcc(btn){await action(btn,()=>api('api/evcc/install',{method:'POST'}),d=>d.message||'evcc installiert')}
 async function configureEvcc(btn){const d=await action(btn,()=>api('api/evcc/configure',{method:'POST'}),'evcc-Konfiguration geschrieben');byId('evccPath').textContent=d.path||''}
 async function makeDashboard(btn){await action(btn,()=>api('api/dashboard',{method:'POST'}),'EnergyKit Dashboard erzeugt')}
@@ -800,7 +949,25 @@ def page(state: dict[str, Any]) -> str:
 <section class='step'>
 <div class='eyebrow'>ENERGIESYSTEM</div><h1 class='title'>Wechselrichter & Speicher</h1><p class='subtitle'>Gerät finden, Integration installieren und den echten Home-Assistant-Config-Flow durchlaufen.</p>
 <div class='panel'><div class='panelhead'><div><h3>Geräteerkennung</h3><p>Im Simulationsmodus werden Testgeräte angeboten.</p></div><button class='btn secondary' onclick='discover(this)'>Geräte suchen</button></div><div id='devices' class='devicegrid'></div></div>
-<div class='panel grid2'><label>Hersteller<select id='vendor'>{select_option("sigenergy",e.get("vendor"),"Sigenergy")}{select_option("deye",e.get("vendor"),"Deye")}</select></label><label>IP / Host<input id='host' value='{h(e.get("host"))}' placeholder='192.168.1.50'></label><label>Port<input id='port' type='number' value='{h(e.get("port") or 502)}'></label><div></div><div class='span2 actions'><button class='btn secondary' onclick='saveDevice(this)'>Gerät speichern</button><button class='btn secondary' onclick="installComp('sigenergy',this)">Sigenergy Integration installieren</button><button class='btn secondary' onclick="installComp('deye',this)">Deye Integration installieren</button></div></div>
+<div class='panel grid2'>
+<label>Hersteller<select id='vendor'>{select_option("sigenergy",e.get("vendor"),"Sigenergy")}{select_option("deye",e.get("vendor"),"Deye")}</select></label>
+<label>IP / Host<input id='host' value='{h(e.get("host"))}' placeholder='192.168.1.50'></label>
+<label>Port<input id='port' type='number' value='{h(e.get("port") or 502)}'></label>
+<label>Modbus ID<input id='energy_modbus_id' type='number' min='1' max='247' value='{h(e.get("modbus_id") or 1)}'></label>
+<label>Deye Profil<select id='deye_profile'>
+{select_option("deye-hybrid-3p",e.get("deye_profile"),"3-phasiger Hybrid / SUN-SG04 (empfohlen)")}
+{select_option("deye-storage",e.get("deye_profile"),"Storage / Hybrid")}
+{select_option("deye-mi",e.get("deye_profile"),"Micro Inverter")}
+</select></label>
+<label>Deye Batterie<select id='deye_batterytype'>
+{select_option("lv",e.get("deye_batterytype"),"LV / Niedervolt")}
+{select_option("hv",e.get("deye_batterytype"),"HV / Hochvolt")}
+</select></label>
+<label class='checkline'><input id='deye_firmware1098' type='checkbox' {"checked" if e.get("deye_firmware1098") else ""}> Deye HV Firmware 1098 oder neuer</label>
+<div></div>
+<div class='span2 callout'><b>Direkter evcc-Pfad:</b> Sigenergy sowie unterstützte Deye-Wechselrichter werden von evcc direkt per Modbus gelesen. Home-Assistant-Entities bleiben nur Dashboard- und Fallback-Daten.</div>
+<div class='span2 actions'><button class='btn secondary' onclick='saveDevice(this)'>Gerät speichern</button><button class='btn secondary' onclick="installComp('sigenergy',this)">Sigenergy Integration installieren</button><button class='btn secondary' onclick="installComp('deye',this)">Deye Integration installieren</button></div>
+</div>
 <div id='integrationRestartNotice' class='callout warn {'hidden' if not state.get("restart_required") else ''}'><b>Neustart erforderlich.</b> Home Assistant muss die neu installierten Custom Integrations erst laden.<div class='actions left'><button class='btn' onclick='restartCore(this)'>Home Assistant jetzt neu starten</button></div></div>
 <div class='panel'><div class='panelhead'><div><h3>Home Assistant Config Flow</h3><p>Sigenergy verwendet den Domain-Handler <code>sigen</code>, Deye <code>deye_modbus</code>.</p></div></div><div class='actions left'><button class='btn' onclick="startFlow('sigenergy',this)">Sigenergy konfigurieren</button><button class='btn secondary' onclick="startFlow('deye',this)">Deye konfigurieren</button></div><div id='flow'></div></div>
 </section>
@@ -813,20 +980,20 @@ def page(state: dict[str, Any]) -> str:
 </section>
 
 <section class='step'>
-<div class='eyebrow'>VERBRAUCHER</div><h1 class='title'>Wallbox & Wärmepumpe</h1><p class='subtitle'>Geräte automatisch finden oder manuell übernehmen. EnergyKit verwendet vorhandene Home-Assistant-Geräte bevorzugt und ergänzt die LAN-Suche.</p>
-<div class='panel'><div class='panelhead'><div><h3>Wallbox suchen</h3><p>Findet vorhandene Charger in Home Assistant und Netzwerkgeräte. Sigenergy AC Charger werden als eigener Gerätetyp erkannt.</p></div><button class='btn secondary' onclick="discoverConsumer('wallbox',this)">Geräte suchen</button></div><div id='wb_devices' class='devicegrid'></div></div>
-<div class='panel grid2'><label>Wallbox<select id='wb_vendor'>{select_option("none",wb.get("vendor"),"Keine")}{select_option("sigenergy",wb.get("vendor"),"Sigenergy Sigen AC Charger")}{select_option("homeassistant",wb.get("vendor"),"Home Assistant Gerät / Entity")}{select_option("go-e",wb.get("vendor"),"go-e")}</select></label><label>Host / Plant-IP<input id='wb_host' value='{h(wb.get("host"))}' placeholder='z. B. Sigen Plant 192.168.1.50'></label><label>Steuer-Entity<input id='wb_entity' value='{h(wb.get("entity"))}' placeholder='switch / button / select aus Home Assistant'></label><label>HA Device-ID<input id='wb_device_id' value='{h(wb.get("device_id"))}' placeholder='wird bei Gerätesuche übernommen'></label><label>Sigenergy Modbus Device-ID<input id='wb_modbus_id' type='number' min='1' max='247' value='{h(wb.get("modbus_id") or 1)}'></label><label>Max. Strom (A)<input id='wb_current' type='number' min='6' value='{h(wb.get("max_current"))}'></label><label>Phasen<input id='wb_phases' type='number' min='1' max='3' value='{h(wb.get("phases"))}'></label><div></div><div class='span2 callout'><b>Sigenergy:</b> Für einen Sigen AC Charger ist normalerweise die Plant-/Inverter-IP relevant. Die Charger Device-ID muss innerhalb der Plant eindeutig sein. EnergyKit speichert beides getrennt, statt die WLAN-IP der Wallbox blind als Modbus-Ziel zu verwenden.</div><div class='span2 actions'><button class='btn' onclick='saveWallbox(this)'>Wallbox speichern</button><button class='btn secondary' onclick="startFlow('sigenergy',this)">Sigenergy Integration öffnen</button></div></div>
-<div class='panel'><div class='panelhead'><div><h3>Wärmepumpe suchen</h3><p>Durchsucht Home Assistant nach Climate-, Switch- und Hersteller-Geräten und ergänzt erreichbare LAN-/Modbus-Geräte.</p></div><button class='btn secondary' onclick="discoverConsumer('heatpump',this)">Geräte suchen</button></div><div id='hp_devices' class='devicegrid'></div></div>
-<div class='panel grid2'><label>Anbindung<select id='hp_mode'>{select_option("none",hp.get("mode"),"Keine")}{select_option("sg-ready",hp.get("mode"),"SG-Ready / Schaltkontakt")}{select_option("modbus",hp.get("mode"),"Modbus TCP")}{select_option("integration",hp.get("mode"),"Home Assistant Integration")}</select></label><label>Hersteller<input id='hp_vendor' value='{h(hp.get("vendor"))}' placeholder='z. B. Vaillant, Viessmann, NIBE'></label><label>Host / IP<input id='hp_host' value='{h(hp.get("host"))}' placeholder='optional bei Integration'></label><label>HA Haupt-Entity<input id='hp_entity' value='{h(hp.get("entity"))}' placeholder='climate.meine_waermepumpe'></label><label>SG-Ready / Freigabe-Switch<input id='hp_switch' value='{h(hp.get("switch"))}' placeholder='switch.sg_ready'></label><label>HA Device-ID<input id='hp_device_id' value='{h(hp.get("device_id"))}' placeholder='wird bei Gerätesuche übernommen'></label><label>Aktiv ab Überschuss (W)<input id='hp_on' type='number' value='{h(hp.get("power_threshold"))}'></label><label>Aus unter (W)<input id='hp_off' type='number' value='{h(hp.get("off_threshold"))}'></label><label>Verzögerung (min)<input id='hp_delay' type='number' value='{h(hp.get("delay_min"))}'></label><div></div><div class='span2 callout'>Bei SG-Ready automatisiert EnergyKit nur den von dir ausgewählten Freigabe-Switch. Bei einer vollständigen HA-Integration bleibt die herstellerspezifische Regelung unangetastet.</div><div class='span2 actions'><button class='btn' onclick='saveHeatpump(this)'>Wärmepumpe speichern</button></div></div>
+<div class='eyebrow'>VERBRAUCHER</div><h1 class='title'>Wallbox & Wärmepumpe</h1><p class='subtitle'>EnergyKit findet Geräte und übersetzt sie in native evcc-Treiber. Home Assistant bleibt Visualisierung und Fallback, nicht der primäre Steuerpfad.</p>
+<div class='panel'><div class='panelhead'><div><h3>Wallbox suchen</h3><p>Durchsucht Home Assistant und das lokale Netz. Treffer dienen der Identifikation; wenn evcc das Gerät nativ unterstützt, verbindet sich evcc direkt zur Hardware.</p></div><button class='btn secondary' onclick="discoverConsumer('wallbox',this)">Geräte suchen</button></div><div id='wb_devices' class='devicegrid'></div></div>
+<div class='panel grid2'><label>Wallbox<select id='wb_vendor'>{select_option("none",wb.get("vendor"),"Keine")}{select_option("sigenergy",wb.get("vendor"),"Sigenergy EVAC")}{select_option("sigenergy-evdc",wb.get("vendor"),"Sigenergy EVDC")}{select_option("go-e",wb.get("vendor"),"go-e Gemini / HOME")}{select_option("openwb",wb.get("vendor"),"openWB")}{select_option("custom",wb.get("vendor"),"Anderer nativer evcc-Treiber")}{select_option("homeassistant",wb.get("vendor"),"Home Assistant Fallback")}</select></label><label>Modell<input id='wb_model' value='{h(wb.get("model"))}' placeholder='z. B. Sigen EVAC 11 kW'></label><label>Steuerpfad<select id='wb_control'>{select_option("native",wb.get("control_path"),"evcc direkt (empfohlen)")}{select_option("homeassistant",wb.get("control_path"),"Home Assistant Fallback")}</select></label><label>evcc Template<input id='wb_template' value='{h(wb.get("evcc_template"))}' placeholder='automatisch, z. B. sigenergy'></label><label>Host / Geräte-IP<input id='wb_host' value='{h(wb.get("host"))}' placeholder='192.168.1.50'></label><label>Port<input id='wb_port' type='number' value='{h(wb.get("port") or 502)}'></label><label>Modbus ID<input id='wb_modbus_id' type='number' min='1' max='247' value='{h(wb.get("modbus_id") or 1)}'></label><label>Phasen<input id='wb_phases' type='number' min='1' max='3' value='{h(wb.get("phases"))}'></label><label>Max. Strom (A)<input id='wb_current' type='number' min='6' value='{h(wb.get("max_current"))}'></label><label>HA Device-ID <small>(nur Erkennung)</small><input id='wb_device_id' value='{h(wb.get("device_id"))}'></label><label>HA Entity <small>(nur Fallback)</small><input id='wb_entity' value='{h(wb.get("entity"))}' placeholder='switch.wallbox'></label><div></div><div class='span2 callout'><b>Sigenergy:</b> EVAC nutzt in evcc das Template <code>sigenergy</code>, EVDC <code>sigenergy-evdc</code>. Beide werden direkt per Modbus TCP angesprochen. Bei EVDC ist die Modbus-ID des zugehörigen Hybrid-Wechselrichters maßgeblich.</div><div class='span2 actions'><button class='btn' onclick='saveWallbox(this)'>Wallbox speichern</button></div></div>
+<div class='panel'><div class='panelhead'><div><h3>Wärmepumpe suchen</h3><p>Findet Climate-/SG-Ready-Geräte und Modbus-Kandidaten. Danach wählst du den nativen evcc-Treiber oder bewusst den HA-Fallback.</p></div><button class='btn secondary' onclick="discoverConsumer('heatpump',this)">Geräte suchen</button></div><div id='hp_devices' class='devicegrid'></div></div>
+<div class='panel grid2'><label>Anbindung<select id='hp_mode'>{select_option("none",hp.get("mode"),"Keine")}{select_option("native",hp.get("mode"),"Nativer evcc Heizgeräte-Treiber")}{select_option("sg-ready",hp.get("mode"),"SG Ready über Relais")}{select_option("integration",hp.get("mode"),"Home Assistant Fallback")}</select></label><label>Hersteller<input id='hp_vendor' value='{h(hp.get("vendor"))}' placeholder='NIBE, Stiebel Eltron, Vaillant …'></label><label>Modell<input id='hp_model' value='{h(hp.get("model"))}'></label><label>Steuerpfad<select id='hp_control'>{select_option("native",hp.get("control_path"),"evcc direkt (empfohlen)")}{select_option("homeassistant",hp.get("control_path"),"Home Assistant Fallback")}</select></label><label>evcc Template<input id='hp_template' value='{h(hp.get("evcc_template"))}' placeholder='z. B. nibe-s-series, stiebel-lwa'></label><label>Host / IP<input id='hp_host' value='{h(hp.get("host"))}'></label><label>Port<input id='hp_port' type='number' value='{h(hp.get("port") or 502)}'></label><label>Modbus ID<input id='hp_modbus_id' type='number' min='1' max='247' value='{h(hp.get("modbus_id") or 1)}'></label><label>SG Ready Relais A<input id='hp_switch' value='{h(hp.get("switch"))}' placeholder='switch.sg_ready_a'></label><label>SG Ready Relais B <small>(optional)</small><input id='hp_switch_b' value='{h(hp.get("switch_b"))}' placeholder='switch.sg_ready_b'></label><label>HA Haupt-Entity <small>(nur Erkennung)</small><input id='hp_entity' value='{h(hp.get("entity"))}' placeholder='climate.waermepumpe'></label><label>HA Device-ID<input id='hp_device_id' value='{h(hp.get("device_id"))}'></label><label>Min. therm./el. Leistung (W)<input id='hp_min_power' type='number' value='{h(hp.get("min_power") or 1200)}'></label><label>Max. Leistung (W)<input id='hp_max_power' type='number' value='{h(hp.get("max_power") or 6000)}'></label><div class='span2 callout'><b>Klare Zuständigkeit:</b> EnergyKit richtet ein. evcc entscheidet im Betrieb über PV-Überschuss, Lade-/Heizleistung und SG Ready. EnergyKit Bridge schaltet keine SG-Ready-Relais mehr selbst.</div><div class='span2 actions'><button class='btn' onclick='saveHeatpump(this)'>Wärmepumpe speichern</button></div></div>
 </section>
 
 <section class='step'>
-<div class='eyebrow'>EVCC</div><h1 class='title'>PV-Überschussladen</h1><p class='subtitle'>evcc wird als Home-Assistant-App installiert und erhält eine EnergyKit-Konfiguration auf Basis der normalisierten Sensoren.</p>
+<div class='eyebrow'>EVCC</div><h1 class='title'>PV-Überschussladen</h1><p class='subtitle'>evcc wird als Home-Assistant-App installiert. Wallboxen und Wärmepumpen werden bevorzugt direkt über native evcc-Treiber angebunden; HA-Entities sind nur Fallback.</p>
 <div class='panel'><div class='row'><span>evcc App<small>{'installiert · '+h(state["evcc"].get("slug")) if state["evcc"].get("installed") else 'nicht installiert'}</small></span><span class='status {'ok' if state["evcc"].get("installed") else ''}'>{'bereit' if state["evcc"].get("installed") else 'offen'}</span></div><div class='row'><span>Konfiguration<small id='evccPath'>{h(state["evcc"].get("config_path") or "")}</small></span><span class='status {'ok' if state["evcc"].get("configured") else ''}'>{'geschrieben' if state["evcc"].get("configured") else 'offen'}</span></div><div class='actions left'><button class='btn' onclick='installEvcc(this)'>evcc installieren</button><button class='btn secondary' onclick='configureEvcc(this)'>Konfiguration erzeugen</button></div></div>
 </section>
 
 <section class='step'>
-<div class='eyebrow'>OBERFLÄCHE</div><h1 class='title'>EnergyKit Dashboard</h1><p class='subtitle'>Erzeugt ein eigenes Lovelace-Dashboard mit Mushroom Cards und den stabilen EnergyKit-Sensoren.</p>
+<div class='eyebrow'>OBERFLÄCHE</div><h1 class='title'>EnergyKit Dashboard</h1><p class='subtitle'>Erzeugt ein kundentaugliches Lovelace-Dashboard ausschließlich mit Home-Assistant-Standardkarten und stabilen EnergyKit-Sensoren. Keine HACS-Frontend-Abhängigkeit.</p>
 <div class='panel'><div class='panelhead'><div><h3>Dashboard</h3><p>URL-Pfad: <code>energykit-dashboard</code>. Vorhandene Installation wird aktualisiert.</p></div><span class='status {'ok' if state["dashboard"].get("installed") else ''}'>{'erstellt' if state["dashboard"].get("installed") else 'offen'}</span></div><div class='actions left'><button class='btn' onclick='makeDashboard(this)'>Dashboard erzeugen</button></div></div>
 </section>
 
@@ -985,9 +1152,28 @@ async def discover_consumers(request: Request, kind: str):
 
 
 @app.post("/api/device")
-async def save_device(request: Request, vendor: str = Form(...), host: str = Form(...), port: int = Form(502)):
+async def save_device(
+    request: Request,
+    vendor: str = Form(...),
+    host: str = Form(...),
+    port: int = Form(502),
+    modbus_id: int = Form(1),
+    deye_profile: str = Form("deye-hybrid-3p"),
+    deye_batterytype: str = Form("lv"),
+    deye_firmware1098: str = Form("false"),
+):
     state = ensure_access(request)
-    state["energy"] = {"vendor": vendor, "host": host.strip(), "port": port, "configured": state["simulation"]}
+    allowed_profiles = {"deye-hybrid-3p", "deye-storage", "deye-mi"}
+    state["energy"] = {
+        "vendor": vendor,
+        "host": host.strip(),
+        "port": max(1, min(65535, port)),
+        "modbus_id": max(1, min(247, modbus_id)),
+        "deye_profile": deye_profile if deye_profile in allowed_profiles else "deye-hybrid-3p",
+        "deye_batterytype": deye_batterytype if deye_batterytype in {"lv", "hv"} else "lv",
+        "deye_firmware1098": str(deye_firmware1098).lower() in {"1", "true", "yes", "on"},
+        "configured": state["simulation"],
+    }
     save_state(state)
     return {"ok": True}
 
@@ -1099,33 +1285,26 @@ async def mapping(request: Request):
 
 
 @app.post("/api/wallbox")
-async def wallbox(request: Request, vendor: str = Form(...), host: str = Form(""), entity: str = Form(""), device_id: str = Form(""), modbus_id: int = Form(1), max_current: int = Form(16), phases: int = Form(3)):
+async def wallbox(request: Request, vendor: str = Form(...), model: str = Form(""), host: str = Form(""), port: int = Form(502), entity: str = Form(""), device_id: str = Form(""), modbus_id: int = Form(1), evcc_template: str = Form(""), control_path: str = Form("native"), max_current: int = Form(16), phases: int = Form(3)):
     state = ensure_access(request)
-    if vendor == "sigenergy" and not host.strip() and not state["simulation"]:
-        # Prefer the already configured Sigen plant host when available.
+    if vendor in {"sigenergy", "sigenergy-evdc"} and not host.strip() and not state["simulation"]:
         host = str(state.get("energy", {}).get("host") or "")
-    state["wallbox"] = {"vendor": vendor, "host": host.strip(), "entity": entity.strip(), "device_id": device_id.strip(), "modbus_id": max(1,min(247,modbus_id)), "max_current": max(6,max_current), "phases": max(1,min(3,phases))}
-    if state["simulation"] and vendor != "none" and not state["wallbox"]["entity"]:
-        state["wallbox"]["entity"] = "button.sigen_ac_charger_start_charging" if vendor == "sigenergy" else "switch.wallbox_enable"
+    template = evcc_template.strip()
+    if not template:
+        template = {"sigenergy":"sigenergy","sigenergy-evdc":"sigenergy-evdc","go-e":"go-e-v3","openwb":"openwb"}.get(vendor, "")
+    state["wallbox"] = {"vendor": vendor, "model": model.strip(), "host": host.strip(), "port": max(1,min(65535,port)), "entity": entity.strip(), "device_id": device_id.strip(), "modbus_id": max(1,min(247,modbus_id)), "evcc_template": template, "control_path": control_path if control_path in {"native","homeassistant"} else "native", "max_current": max(6,max_current), "phases": max(1,min(3,phases))}
     save_state(state)
-    return {"ok": True, "wallbox": state["wallbox"]}
+    return {"ok": True, "wallbox": state["wallbox"], "evcc_driver": template or ("homeassistant-switch" if control_path == "homeassistant" else None)}
 
 
 @app.post("/api/heatpump")
-async def heatpump(request: Request, mode: str = Form(...), vendor: str = Form(""), host: str = Form(""), entity: str = Form(""), device_id: str = Form(""), switch_entity: str = Form(""), power_threshold: int = Form(2500), off_threshold: int = Form(800), delay_min: int = Form(5)):
+async def heatpump(request: Request, mode: str = Form(...), vendor: str = Form(""), model: str = Form(""), host: str = Form(""), port: int = Form(502), entity: str = Form(""), device_id: str = Form(""), switch_entity: str = Form(""), switch_b: str = Form(""), modbus_id: int = Form(1), evcc_template: str = Form(""), control_path: str = Form("native"), min_power: int = Form(1200), max_power: int = Form(6000)):
     state = ensure_access(request)
-    state["heatpump"] = {"mode": mode, "vendor": vendor.strip(), "host": host.strip(), "entity": entity.strip(), "device_id": device_id.strip(), "switch": switch_entity.strip(), "power_threshold": max(0,power_threshold), "off_threshold": max(0,off_threshold), "delay_min": max(1,delay_min)}
-    if state["simulation"] and mode == "sg-ready" and not state["heatpump"]["switch"]:
-        state["heatpump"]["switch"] = "switch.sg_ready"
+    state["heatpump"] = {"mode": mode, "vendor": vendor.strip(), "model": model.strip(), "host": host.strip(), "port": max(1,min(65535,port)), "entity": entity.strip(), "device_id": device_id.strip(), "switch": switch_entity.strip(), "switch_b": switch_b.strip(), "modbus_id": max(1,min(247,modbus_id)), "evcc_template": evcc_template.strip(), "control_path": control_path if control_path in {"native","homeassistant"} else "native", "min_power": max(0,min_power), "max_power": max(max(0,min_power),max_power)}
     save_state(state)
     if state.get("mapping"):
         write_bridge_mapping(state)
-        if "bridge" in state.get("components", {}):
-            try:
-                await sup("POST", "/core/restart", json={})
-            except Exception:
-                pass
-    return {"ok": True}
+    return {"ok": True, "heatpump": state["heatpump"], "runtime_controller": "evcc"}
 
 
 @app.post("/api/evcc/install")
@@ -1194,18 +1373,32 @@ async def evcc_configure(request: Request):
 
 
 DASHBOARD = {"views": [
-    {"title": "Energie", "path": "energie", "icon": "mdi:home-lightning-bolt", "cards": [
-        {"type": "custom:mushroom-title-card", "title": "EnergyKit", "subtitle": "Energieübersicht"},
-        {"type": "grid", "columns": 2, "square": False, "cards": [
-            {"type": "custom:mushroom-entity-card", "entity": "sensor.ek_pv_power", "name": "PV", "icon": "mdi:solar-power"},
-            {"type": "custom:mushroom-entity-card", "entity": "sensor.ek_house_power", "name": "Haus", "icon": "mdi:home-lightning-bolt"},
-            {"type": "custom:mushroom-entity-card", "entity": "sensor.ek_grid_power", "name": "Netz", "icon": "mdi:transmission-tower"},
-            {"type": "custom:mushroom-entity-card", "entity": "sensor.ek_battery_soc", "name": "Batterie", "icon": "mdi:battery"},
+    {"title": "Übersicht", "path": "uebersicht", "icon": "mdi:view-dashboard", "cards": [
+        {"type": "markdown", "content": "# EnergyKit\\n### Energie auf einen Blick\\nPV, Haus, Netz und Speicher in einer ruhigen Kundenansicht."},
+        {"type": "grid", "columns": 4, "square": False, "cards": [
+            {"type": "gauge", "entity": "sensor.ek_pv_power", "name": "PV-Leistung", "min": 0, "max": 15000, "needle": True},
+            {"type": "gauge", "entity": "sensor.ek_house_power", "name": "Hausverbrauch", "min": 0, "max": 15000, "needle": True},
+            {"type": "gauge", "entity": "sensor.ek_battery_soc", "name": "Speicher", "min": 0, "max": 100, "needle": True},
+            {"type": "entity", "entity": "sensor.ek_grid_power", "name": "Netz", "icon": "mdi:transmission-tower"},
         ]},
-        {"type": "history-graph", "title": "Leistung", "hours_to_show": 24, "entities": ["sensor.ek_pv_power", "sensor.ek_house_power", "sensor.ek_grid_power", "sensor.ek_battery_power"]},
+        {"type": "entities", "title": "Aktueller Energiefluss", "show_header_toggle": False, "entities": [
+            {"entity": "sensor.ek_pv_power", "name": "PV-Erzeugung", "icon": "mdi:solar-power"},
+            {"entity": "sensor.ek_house_power", "name": "Hausverbrauch", "icon": "mdi:home-lightning-bolt"},
+            {"entity": "sensor.ek_grid_power", "name": "Netzbezug / Einspeisung", "icon": "mdi:transmission-tower"},
+            {"entity": "sensor.ek_battery_power", "name": "Batterieleistung", "icon": "mdi:battery-sync"},
+            {"entity": "sensor.ek_battery_soc", "name": "Batterieladestand", "icon": "mdi:battery"},
+        ]},
+        {"type": "history-graph", "title": "Leistungsverlauf · 24 Stunden", "hours_to_show": 24, "entities": ["sensor.ek_pv_power", "sensor.ek_house_power", "sensor.ek_grid_power", "sensor.ek_battery_power"]},
+        {"type": "markdown", "content": "**Hinweis**  \\nNegative Netzleistung bedeutet Einspeisung. Die eigentliche PV-Überschussregelung für Wallbox und Wärmepumpe übernimmt evcc."},
     ]},
-    {"title": "Steuerung", "path": "steuerung", "icon": "mdi:tune", "cards": [
-        {"type": "custom:mushroom-title-card", "title": "Steuerung", "subtitle": "Wallbox und Wärmepumpe"},
+    {"title": "Verbraucher", "path": "verbraucher", "icon": "mdi:ev-station", "cards": [
+        {"type": "markdown", "content": "# Flexible Verbraucher\\nWallbox und Wärmepumpe werden von **evcc** optimiert. EnergyKit stellt die Geräte bereit und zeigt den Anlagenzustand."},
+        {"type": "entities", "title": "Energiestatus", "entities": ["sensor.ek_pv_power", "sensor.ek_grid_power", "sensor.ek_battery_soc"]},
+        {"type": "markdown", "content": "### Bedienung\\nLademodus, Ladepläne und Heizstrategien werden in evcc verwaltet. Dadurch gibt es nur **eine** Energiemanagement-Engine und keine konkurrierenden Home-Assistant-Automationen."},
+    ]},
+    {"title": "Anlage", "path": "anlage", "icon": "mdi:cog-outline", "cards": [
+        {"type": "markdown", "content": "# Anlagenstatus\\nEnergyKit verwendet stabile `sensor.ek_*`-Entitäten. Herstellerwechsel oder Integrationsupdates verändern damit nicht automatisch das Kundendashboard."},
+        {"type": "entities", "title": "EnergyKit Messpunkte", "entities": ["sensor.ek_pv_power", "sensor.ek_house_power", "sensor.ek_grid_power", "sensor.ek_battery_power", "sensor.ek_battery_soc"]},
     ]},
 ]}
 
@@ -1213,20 +1406,9 @@ DASHBOARD = {"views": [
 @app.post("/api/dashboard")
 async def dashboard(request: Request):
     state = ensure_access(request)
-    if "mushroom" not in state.get("components", {}):
-        raise HTTPException(409, "Mushroom muss vor dem Dashboard installiert werden")
     if state.get("restart_required") and not state["simulation"]:
         raise HTTPException(409, "Home Assistant muss vor dem Dashboard zuerst neu gestartet werden")
     (DATA / "dashboard.json").write_text(json.dumps(DASHBOARD, indent=2))
-    try:
-        resources = (await core_ws([{"type": "lovelace/resources"}]))[0] or []
-    except Exception:
-        resources = []
-    if not any(r.get("url") == "/local/mushroom.js" for r in resources):
-        try:
-            await core_ws([{"type": "lovelace/resources/create", "res_type": "module", "url": "/local/mushroom.js"}])
-        except Exception:
-            pass
     try:
         await core_ws([{"type": "lovelace/dashboards/create", "url_path": "energykit-dashboard", "title": "EnergyKit", "icon": "mdi:home-lightning-bolt", "show_in_sidebar": True, "require_admin": False}])
     except Exception:

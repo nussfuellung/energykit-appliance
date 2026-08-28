@@ -208,3 +208,12 @@ ls -lh energykit-installer-amd64.iso.sha256
 echo
 echo "SHA-256:"
 cat energykit-installer-amd64.iso.sha256
+# v0.6.0 architecture guardrails
+if grep -R -q '_setup_heatpump_control\|power_threshold\|off_threshold\|delay_min' ../energykit/app/bundled/energykit_bridge 2>/dev/null; then
+  echo 'FEHLER: EnergyKit Bridge enthält wieder eigene Wärmepumpen-Regelung.'
+  exit 1
+fi
+if ! grep -q 'sigenergy-evdc' ../energykit/app/main.py; then
+  echo 'FEHLER: Sigenergy EVDC evcc-Treiber fehlt.'
+  exit 1
+fi
