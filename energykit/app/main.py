@@ -26,6 +26,7 @@ TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 DATA = Path("/config")
 HA = Path("/homeassistant")
 ADDON_CONFIGS = Path("/addon_configs")
+EVCC_SPONSOR_TOKEN_FILE = Path("/config/evcc_sponsor_token")
 STATE_FILE = DATA / "state.json"
 MAPPING_FILE = HA / "energykit_mapping.json"
 REPORT_FILE = DATA / "last_report.json"
@@ -675,13 +676,37 @@ def _evcc_energy_meters(energy: dict[str, Any]) -> list[str]:
     ]
 
 
+
+def _read_evcc_sponsor_token() -> str:
+    try:
+        return EVCC_SPONSOR_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def _write_evcc_sponsor_token(token: str) -> None:
+    token = token.strip()
+    if not token:
+        EVCC_SPONSOR_TOKEN_FILE.unlink(missing_ok=True)
+        return
+    EVCC_SPONSOR_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = EVCC_SPONSOR_TOKEN_FILE.with_suffix(".tmp")
+    tmp.write_text(token + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    tmp.replace(EVCC_SPONSOR_TOKEN_FILE)
+    os.chmod(EVCC_SPONSOR_TOKEN_FILE, 0o600)
+
+
 def evcc_yaml(state: dict[str, Any]) -> str:
     wall = state["wallbox"]
     hp = state["heatpump"]
     lines = [
         "network:", "  schema: http", "  host: 0.0.0.0", "  port: 7070", "interval: 30s",
-        "meters:",
     ]
+    sponsor_token = _read_evcc_sponsor_token()
+    if sponsor_token:
+        lines += [f"sponsortoken: {sponsor_token}"]
+    lines += ["meters:"]
     lines += _evcc_energy_meters(state["energy"])
     lines += [
         "site:", "  title: EnergyKit", "  meters:", "    grid: grid", "    pv: [pv]", "    battery: [battery]",
@@ -885,6 +910,7 @@ function useConsumer(kind,x){
 async function saveWallbox(btn){await action(btn,()=>api('api/wallbox',{method:'POST',body:fd({vendor:byId('wb_vendor').value,model:byId('wb_model').value,host:byId('wb_host').value,port:byId('wb_port').value,entity:byId('wb_entity').value,device_id:byId('wb_device_id').value,modbus_id:byId('wb_modbus_id').value,evcc_template:byId('wb_template').value,control_path:byId('wb_control').value,max_current:byId('wb_current').value,phases:byId('wb_phases').value})}),'Wallbox gespeichert')}
 async function saveHeatpump(btn){await action(btn,()=>api('api/heatpump',{method:'POST',body:fd({mode:byId('hp_mode').value,vendor:byId('hp_vendor').value,model:byId('hp_model').value,host:byId('hp_host').value,port:byId('hp_port').value,entity:byId('hp_entity').value,device_id:byId('hp_device_id').value,switch_entity:byId('hp_switch').value,switch_b:byId('hp_switch_b').value,modbus_id:byId('hp_modbus_id').value,evcc_template:byId('hp_template').value,control_path:byId('hp_control').value,min_power:byId('hp_min_power').value,max_power:byId('hp_max_power').value})}),'Wärmepumpe gespeichert')}
 async function installEvcc(btn){await action(btn,()=>api('api/evcc/install',{method:'POST'}),d=>d.message||'evcc installiert')}
+async function saveEvccSponsorToken(btn){await action(btn,()=>api('api/evcc/sponsor-token',{method:'POST',body:fd({token:byId('evccSponsorToken').value})}),d=>d.configured?'Sponsortoken gespeichert':'Sponsortoken entfernt');byId('evccSponsorToken').value=''}
 async function configureEvcc(btn){const d=await action(btn,()=>api('api/evcc/configure',{method:'POST'}),'evcc-Konfiguration geschrieben');byId('evccPath').textContent=d.path||''}
 async function makeDashboard(btn){await action(btn,()=>api('api/dashboard',{method:'POST'}),'EnergyKit Dashboard erzeugt')}
 async function runChecks(btn){const d=await action(btn,()=>api('api/checks',{method:'POST'}),'Prüfung abgeschlossen');byId('checks').innerHTML=d.checks.map(x=>`<div class="row"><span>${esc(x.name)}<small>${esc(x.detail||'')}</small></span><span class="status ${x.ok?'ok':'bad'}">${x.ok?'OK':'Fehler'}</span></div>`).join('');byId('checkProgress').style.width=`${d.percent}%`;byId('checkSummary').textContent=`${d.ok}/${d.total} Prüfungen bestanden · ${d.percent}%`}
@@ -989,7 +1015,7 @@ def page(state: dict[str, Any]) -> str:
 
 <section class='step'>
 <div class='eyebrow'>EVCC</div><h1 class='title'>PV-Überschussladen</h1><p class='subtitle'>evcc wird als Home-Assistant-App installiert. Wallboxen und Wärmepumpen werden bevorzugt direkt über native evcc-Treiber angebunden; HA-Entities sind nur Fallback.</p>
-<div class='panel'><div class='row'><span>evcc App<small>{'installiert · '+h(state["evcc"].get("slug")) if state["evcc"].get("installed") else 'nicht installiert'}</small></span><span class='status {'ok' if state["evcc"].get("installed") else ''}'>{'bereit' if state["evcc"].get("installed") else 'offen'}</span></div><div class='row'><span>Konfiguration<small id='evccPath'>{h(state["evcc"].get("config_path") or "")}</small></span><span class='status {'ok' if state["evcc"].get("configured") else ''}'>{'geschrieben' if state["evcc"].get("configured") else 'offen'}</span></div><div class='actions left'><button class='btn' onclick='installEvcc(this)'>evcc installieren</button><button class='btn secondary' onclick='configureEvcc(this)'>Konfiguration erzeugen</button></div></div>
+<div class='panel'><div class='row'><span>evcc App<small>{'installiert · '+h(state["evcc"].get("slug")) if state["evcc"].get("installed") else 'nicht installiert'}</small></span><span class='status {'ok' if state["evcc"].get("installed") else ''}'>{'bereit' if state["evcc"].get("installed") else 'offen'}</span></div><div class='row'><span>Konfiguration<small id='evccPath'>{h(state["evcc"].get("config_path") or "")}</small></span><span class='status {'ok' if state["evcc"].get("configured") else ''}'>{'geschrieben' if state["evcc"].get("configured") else 'offen'}</span></div><div class='row'><span>Sponsoring<small>{'Sponsortoken hinterlegt' if _read_evcc_sponsor_token() else 'optional · für sponsorpflichtige Geräte'}</small></span><span class='status {'ok' if _read_evcc_sponsor_token() else ''}'>{'gesetzt' if _read_evcc_sponsor_token() else 'optional'}</span></div><div class='grid2 compact'><label class='span2'>evcc Sponsortoken<input id='evccSponsorToken' type='password' autocomplete='off' placeholder='Token einfügen · leer speichern entfernt den Token'></label></div><div class='actions left'><button class='btn secondary' onclick='saveEvccSponsorToken(this)'>Sponsortoken speichern</button><button class='btn' onclick='installEvcc(this)'>evcc installieren</button><button class='btn secondary' onclick='configureEvcc(this)'>Konfiguration erzeugen</button></div><p class='muted'>Der Token wird separat mit Dateirechten 0600 gespeichert und nicht in Diagnose oder Anlagenstatus ausgegeben.</p></div>
 </section>
 
 <section class='step'>
@@ -1335,6 +1361,16 @@ async def evcc_install(request: Request):
     state["evcc"].update({"installed": True, "slug": slug})
     save_state(state)
     return {"ok": True, "slug": slug, "message": "evcc installiert"}
+
+
+@app.post("/api/evcc/sponsor-token")
+async def evcc_sponsor_token(request: Request, token: str = Form("")):
+    ensure_access(request)
+    cleaned = token.strip()
+    if cleaned and len(cleaned) < 20:
+        raise HTTPException(400, "Sponsortoken wirkt unvollständig")
+    _write_evcc_sponsor_token(cleaned)
+    return {"ok": True, "configured": bool(cleaned)}
 
 
 @app.post("/api/evcc/configure")

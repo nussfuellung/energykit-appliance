@@ -3,7 +3,8 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-cd "$SCRIPT_DIR"
+cd "${SCRIPT_DIR}"
+
 
 command -v lb >/dev/null || {
   echo "FEHLER: live-build fehlt."
@@ -211,11 +212,11 @@ echo
 echo "SHA-256:"
 cat energykit-installer-amd64.iso.sha256
 # v0.6.0 architecture guardrails
-if grep -R -q '_setup_heatpump_control\|power_threshold\|off_threshold\|delay_min' "$PROJECT_ROOT/energykit/app/bundled/energykit_bridge" 2>/dev/null; then
+if grep -R -q '_setup_heatpump_control\|power_threshold\|off_threshold\|delay_min' "${PROJECT_ROOT}/energykit/app/bundled/energykit_bridge" 2>/dev/null; then
   echo 'FEHLER: EnergyKit Bridge enthält wieder eigene Wärmepumpen-Regelung.'
   exit 1
 fi
-if ! grep -q 'sigenergy-evdc' "$PROJECT_ROOT/energykit/app/main.py"; then
+if ! grep -q 'sigenergy-evdc' "${PROJECT_ROOT}/energykit/app/main.py"; then
   echo 'FEHLER: Sigenergy EVDC evcc-Treiber fehlt.'
   exit 1
 fi
