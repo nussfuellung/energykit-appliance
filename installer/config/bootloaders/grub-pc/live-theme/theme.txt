@@ -1,49 +1,36 @@
 title-text: ""
 desktop-image: "background.png"
-desktop-image-scale-method: "stretch"
 desktop-color: "#06101c"
-
-terminal-left: "0"
-terminal-top: "0"
-terminal-width: "100%"
-terminal-height: "100%"
-terminal-border: "0"
 
 + boot_menu {
   left = 7%
-  top = 49%
+  top = 48%
   width = 46%
-  height = 32%
-
-  item_font = "DejaVu Sans Bold 16"
-  selected_item_font = "DejaVu Sans Bold 16"
-
+  height = 30%
+  item_font = "DejaVu Sans 16"
+  selected_item_font = "DejaVu Sans 16"
   item_color = "#aebdca"
   selected_item_color = "#ffffff"
-
-  item_height = 54
-  item_padding = 12
+  item_height = 48
+  item_padding = 10
   item_spacing = 4
-
-  selected_item_pixmap_style = "selected_*.png"
   scrollbar = false
 }
 
 + label {
   left = 7%
-  top = 44%
+  top = 43%
   width = 46%
   text = "ENERGYKIT APPLIANCE"
   color = "#16b6d9"
-  font = "DejaVu Sans Bold 16"
+  font = "DejaVu Sans 16"
 }
 
 + label {
   left = 7%
-  top = 84%
+  top = 82%
   width = 46%
-  id = "__timeout__"
-  text = "Start in %d Sekunden"
-  color = "#6f8294"
-  font = "DejaVu Sans Bold 16"
+  text = "H-IT Solutions  |  EnergyKit v0.5.8"
+  color = "#7f91a3"
+  font = "DejaVu Sans 14"
 }

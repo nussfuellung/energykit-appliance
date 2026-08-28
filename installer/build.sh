@@ -38,6 +38,47 @@ echo "[3/4] ISO bauen..."
 lb build
 
 echo
+echo "== EnergyKit Preseed Validierung =="
+for SCRIPT in \
+  config/includes.chroot/usr/local/bin/energykit-installer \
+  config/includes.chroot/usr/local/bin/energykit-installer-gui
+do
+  if grep -qE '"access_token"|ENERGYKIT_SUPERVISOR_TOKEN' "$SCRIPT"; then
+    echo "FEHLER: $SCRIPT erzeugt weiterhin eigene Supervisor-Credentials."
+    exit 1
+  fi
+done
+echo "Preseed-Credentials: Supervisor-owned ✓"
+
+echo
+echo "== EnergyKit GRUB Validierung =="
+if [[ -f binary/boot/grub/config.cfg ]]; then
+  sed -n '1,220p' binary/boot/grub/config.cfg
+
+  grep -q 'set theme=/boot/grub/live-theme/theme.txt' binary/boot/grub/config.cfg || {
+    echo "FEHLER: Theme-Initialisierung fehlt in generierter config.cfg."
+    exit 1
+  }
+  grep -q 'background_image /boot/grub/live-theme/background.png' binary/boot/grub/config.cfg || {
+    echo "FEHLER: GRUB Hintergrund-Fallback fehlt."
+    exit 1
+  }
+  if grep -qE '@KERNEL_LIVE@|@INITRD_LIVE@|(^|[[:space:]])KERNEL_LIVE([[:space:]]|$)|(^|[[:space:]])INITRD_LIVE([[:space:]]|$)' binary/boot/grub/config.cfg; then
+    echo "FEHLER: Nicht ersetzte GRUB-Platzhalter in generierter config.cfg."
+    exit 1
+  fi
+else
+  echo "WARNUNG: binary/boot/grub/config.cfg im Arbeitsbaum nicht gefunden."
+fi
+
+if [[ -f binary/boot/grub/live-theme/theme.txt ]]; then
+  echo "GRUB Theme vorhanden ✓"
+else
+  echo "WARNUNG: GRUB Theme im binary-Arbeitsbaum nicht sichtbar."
+fi
+
+
+echo
 echo "== EnergyKit GRUB Validierung =="
 if [[ -f binary/boot/grub/grub.cfg ]]; then
   echo "--- binary/boot/grub/grub.cfg ---"

@@ -20,9 +20,9 @@ import websockets
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
-APP_VERSION = "0.5.6"
+APP_VERSION = "0.5.8"
 SUPERVISOR = "http://supervisor"
-TOKEN = os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("ENERGYKIT_SUPERVISOR_TOKEN", "")
+TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 DATA = Path("/config")
 HA = Path("/homeassistant")
 ADDON_CONFIGS = Path("/addon_configs")
@@ -84,9 +84,9 @@ def require_supervisor_token() -> str:
     if not TOKEN:
         raise HTTPException(
             503,
-            "EnergyKit hat keinen Supervisor-Token erhalten. "
-            "Die Appliance muss mit dem aktuellen EnergyKit-Preseed installiert "
-            "oder EnergyKit danach neu installiert werden."
+            "EnergyKit wurde ohne Supervisor-Token gestartet. "
+            "Der Supervisor-App-Lifecycle wurde nicht vollständig ausgeführt. "
+            "Bitte EnergyKit bzw. die Appliance mit dem aktuellen Build neu starten."
         )
     return TOKEN
 
@@ -1099,11 +1099,7 @@ async def diagnostics(request: Request):
     state = ensure_access(request)
     result = {
         "supervisor_token": bool(TOKEN),
-        "supervisor_token_source": (
-            "SUPERVISOR_TOKEN" if os.environ.get("SUPERVISOR_TOKEN")
-            else "ENERGYKIT_SUPERVISOR_TOKEN" if os.environ.get("ENERGYKIT_SUPERVISOR_TOKEN")
-            else None
-        ),
+        "supervisor_token_source": ("SUPERVISOR_TOKEN" if os.environ.get("SUPERVISOR_TOKEN") else None),
         "homeassistant_config_mounted": HA.exists(),
         "addon_configs_mounted": ADDON_CONFIGS.exists(),
         "service_user": bool(state.get("service_user_id")),

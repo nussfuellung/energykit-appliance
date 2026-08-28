@@ -528,14 +528,14 @@ class Installer(tk.Tk):
             slug=config["slug"]; installed_slug=f"local_{slug}"
             system_cfg=dict(config); system_cfg["repository"]="local"; system_cfg["translations"]={}
             resolved_image=config["image"].replace("{arch}","amd64")
-            supervisor_token=secrets.token_hex(64)
-            system_cfg.setdefault("environment", {})["ENERGYKIT_SUPERVISOR_TOKEN"]=supervisor_token
+
+            # Leave credential creation to Supervisor App.start(). This mirrors
+            # AppsData.install() and prevents a preseeded token from bypassing
+            # Supervisor's normal token lifecycle.
             user_cfg={
-                "version":str(config["version"]),"image":resolved_image,
-                "uuid":secrets.token_hex(16),"access_token":supervisor_token,
-                "ingress_token":secrets.token_urlsafe(32),"options":dict(config.get("options") or {}),
-                "auto_update":False,"boot":"auto","protected":True,"ingress_panel":True,
-                "watchdog":False,"system_managed":False,
+                "version":str(config["version"]),
+                "image":resolved_image,
+                "options":dict(config.get("options") or {}),
             }
             apps_file=supervisor/"apps.json"
             data={"user":{},"system":{}}
@@ -549,7 +549,7 @@ class Installer(tk.Tk):
             os.chmod(apps_file,0o600)
             (supervisor/"energykit-preseed.json").write_text(json.dumps({
                 "energykit_version":config["version"],"haos_version":HAOS_VERSION,
-                "image":resolved_image,"installed_slug":installed_slug,"mode":"local-app-preseed",
+                "image":resolved_image,"installed_slug":installed_slug,"mode":"supervisor-token-on-first-start",
             },indent=2)+"\n")
         finally:
             run("sync",capture=False)

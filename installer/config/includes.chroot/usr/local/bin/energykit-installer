@@ -155,25 +155,21 @@ def preseed(target):
         system_cfg["repository"] = "local"
         system_cfg["translations"] = {}
         resolved_image = config["image"].replace("{arch}", "amd64")
-        supervisor_token = secrets.token_hex(64)
-        # Store the token in Supervisor's normal app user config and also in a
-        # separate environment variable. The latter is a fallback for preseeded
-        # local apps where Supervisor may not inject SUPERVISOR_TOKEN on the
-        # first container creation.
-        system_cfg.setdefault("environment", {})["ENERGYKIT_SUPERVISOR_TOKEN"] = supervisor_token
+
+        # IMPORTANT:
+        # Do not fabricate Supervisor credentials here.
+        #
+        # This intentionally mirrors Supervisor AppsData.install(): mark the app
+        # installed with only version/image/options. On first automatic boot,
+        # Supervisor App.start() creates the access token itself, persists it,
+        # writes options and injects SUPERVISOR_TOKEN into the container.
+        #
+        # UUID, ingress token and other defaults are filled by Supervisor's
+        # apps.json schema during load.
         user_cfg = {
             "version": str(config["version"]),
             "image": resolved_image,
-            "uuid": secrets.token_hex(16),
-            "access_token": supervisor_token,
-            "ingress_token": secrets.token_urlsafe(32),
             "options": dict(config.get("options") or {}),
-            "auto_update": False,
-            "boot": "auto",
-            "protected": True,
-            "ingress_panel": True,
-            "watchdog": False,
-            "system_managed": False,
         }
 
         apps_file = supervisor / "apps.json"
@@ -195,7 +191,7 @@ def preseed(target):
             "haos_version": HAOS_VERSION,
             "image": resolved_image,
             "installed_slug": installed_slug,
-            "mode": "local-app-preseed",
+            "mode": "supervisor-token-on-first-start",
         }, indent=2) + "\n")
         print("✓ EnergyKit als installierte lokale HAOS-App vorgemerkt")
         print("✓ Supervisor wird das gepinnte EnergyKit-Image beim ersten Start laden")

@@ -245,3 +245,25 @@ sichtbar sind.
 - Hintergrund liegt direkt im Theme-Verzeichnis
 - falsche `@KERNEL_LIVE@` Platzhalter durch die von live-build tatsächlich ersetzten Tokens ersetzt
 - Build prüft die bereits generierte `binary/boot/grub/config.cfg` auf nicht ersetzte Platzhalter
+
+
+## v0.5.8 – Supervisor Lifecycle + GRUB Hard Fix
+
+### Supervisor-Token
+EnergyKit erzeugt beim Preseed **keinen eigenen Supervisor-Token mehr**.
+`apps.json` wird mit demselben minimalen User-State vorbereitet, den Supervisor
+bei einer regulären App-Installation zunächst erzeugt: Version, Image und
+Options. Beim ersten automatischen Start erzeugt Supervisor selbst den
+`access_token`, speichert ihn und injiziert ihn als `SUPERVISOR_TOKEN` in den
+EnergyKit-Container.
+
+Damit bleibt die Appliance vollständig automatisch, der Token-Lifecycle gehört
+aber wieder dem Supervisor.
+
+### GRUB
+Der v0.5.7 Hard-Fix ist enthalten:
+- Theme-Bootstrap direkt in `config.cfg`
+- `background_image` als Fallback
+- `gfxterm` + `png`
+- vereinfachtes GRUB-2.06-Theme
+- kein konkurrierender `grub-efi` Customization-Baum
